@@ -1,0 +1,183 @@
+openapi: 3.0.3
+info:
+  title: 물류자동화 업무 봇 API
+  version: "1.0.0"
+  description: |
+    x-cursor-app-token 으로만 봇을 인증합니다. 값은 비밀 BOT_API_TOKEN 입니다.
+    스케줄 웹훅은 SCHEDULER_TOKEN 입니다. 사람 관리자 권한으로 바뀌지 않습니다.
+servers:
+  - url: https://APP_HOST
+components:
+  securitySchemes:
+    botToken:
+      type: apiKey
+      in: header
+      name: x-cursor-app-token
+  schemas:
+    Page:
+      type: object
+      properties:
+        items:
+          type: array
+          items: {}
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+security:
+  - botToken: []
+paths:
+  /api/bot/tasks:
+    get:
+      summary: 업무 목록
+      parameters:
+        - in: query
+          name: due
+          schema:
+            type: string
+            enum: [soon, overdue, stale, today, week, next]
+        - in: query
+          name: assigneeId
+          schema: { type: string }
+        - in: query
+          name: categoryId
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: priority
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: 페이지
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Page"
+              example:
+                items: []
+                total: 0
+                limit: 20
+                offset: 0
+  /api/bot/tasks/{id}:
+    get:
+      summary: 업무 상세
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 업무, 댓글, 변경 기록
+    patch:
+      summary: 거절되는 변경
+      description: 담당자, 마감, 완료, 삭제를 포함한 모든 수정은 403입니다.
+      responses:
+        "403":
+          description: 봇은 업무를 수정할 수 없습니다.
+  /api/bot/changes:
+    get:
+      summary: 최근 변경
+      parameters:
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        "200":
+          description: 변경 목록
+  /api/bot/alerts:
+    post:
+      summary: 알림 생성
+      requestBody:
+        required: true
+        content:
+          application/json:
+            example:
+              taskId: TASK_ID
+              kind: overdue
+              body: 마감이 지났습니다.
+              idempotencyKey: overdue-TASK_ID-2026-11-17
+      responses:
+        "200":
+          description: 생성 여부. 업무 필드는 바뀌지 않습니다.
+  /api/bot/comments:
+    post:
+      summary: 진행 확인 또는 제안 댓글
+      requestBody:
+        required: true
+        content:
+          application/json:
+            example:
+              taskId: TASK_ID
+              kind: progress_check
+              body: 오늘 입고 여부를 확인해 주세요.
+      responses:
+        "200":
+          description: 댓글 id
+  /api/bot/summaries:
+    post:
+      summary: 일간 또는 주간 요약 저장
+      requestBody:
+        required: true
+        content:
+          application/json:
+            example:
+              kind: daily
+              periodKey: daily:2026-11-18
+              body: 오늘 마감 2건. 지연 1건.
+      responses:
+        "200":
+          description: 저장된 기간 키
+  /api/bot/runs:
+    post:
+      summary: 실행 성공 또는 오류 기록
+      requestBody:
+        required: true
+        content:
+          application/json:
+            examples:
+              success:
+                value:
+                  job: morning
+                  status: success
+                  idempotencyKey: morning:2026-11-18
+                  detail: 요약 저장
+              error:
+                value:
+                  job: morning
+                  status: error
+                  error: upstream timeout
+                  idempotencyKey: morning:2026-11-18:retry1
+      responses:
+        "200":
+          description: 기록 id. 같은 성공 키는 duplicate true
+  /api/jobs/webhook:
+    post:
+      summary: 멱등한 수동 스케줄 실행
+      description: |
+        헤더는 SCHEDULER_TOKEN 입니다. 무인 크론은 확인되지 않았습니다.
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          schema: { type: string }
+      responses:
+        "200":
+          description: 작업 결과. 재호출 시 duplicate true 일 수 있습니다.
+        "503":
+          description: 토큰이 설정되지 않음

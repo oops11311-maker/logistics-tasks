@@ -1,0 +1,242 @@
+openapi: 3.0.3
+info:
+  title: 물류자동화팀 작업 API
+  version: "1.0.0"
+  description: |
+    팀 작업 추적 HTTP API. 화면과 분리되어 있습니다.
+    사람 요청은 Cursor 게이트가 붙인 신원으로만 인정합니다. 브라우저는 토큰을 보내지 않습니다.
+    봇은 Authorization: Bearer <BOT_API_TOKEN> 만 사용합니다.
+    예약 실행은 POST /api/jobs/run 이며, 관리자 세션 또는 Authorization: Bearer <SCHEDULER_TOKEN> 입니다.
+    이 배포에는 그 경로를 주기적으로 호출하는 스케줄러가 연결되어 있지 않습니다.
+servers:
+  - url: /
+paths:
+  /api/me:
+    get:
+      summary: 현재 구성원
+      responses:
+        "200": { description: 구성원 프로필 }
+        "401": { description: 로그인 없음 }
+        "403": { description: 팀원이 아님 }
+  /api/tasks:
+    get:
+      summary: 작업 목록
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: assignee
+          schema: { type: string }
+        - in: query
+          name: category
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: priority
+          schema: { type: string }
+        - in: query
+          name: due
+          schema: { type: string, enum: [overdue, today, week, next, none] }
+        - in: query
+          name: bucket
+          schema: { type: string, enum: [today, week, all, done] }
+        - in: query
+          name: limit
+          schema: { type: integer }
+        - in: query
+          name: offset
+          schema: { type: integer }
+      responses:
+        "200": { description: 작업 목록 }
+    post:
+      summary: 작업 만들기
+      responses:
+        "201": { description: 생성된 작업 }
+  /api/tasks/{id}:
+    get:
+      summary: 작업 상세
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: 작업, 댓글, 기록 }
+    patch:
+      summary: 작업 수정. version이 다르면 409
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: 수정된 작업 }
+        "409": { description: 버전 충돌 }
+  /api/tasks/bulk:
+    post:
+      summary: 상태 또는 담당 일괄 변경
+      responses:
+        "200": { description: 변경된 작업 }
+        "409": { description: 버전 충돌 }
+  /api/tasks/{id}/comments:
+    post:
+      summary: 댓글
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "201": { description: 댓글 }
+  /api/tasks/{id}/trash:
+    post:
+      summary: 휴지통으로 이동. 영구 삭제는 없습니다.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: 휴지통으로 이동 }
+  /api/tasks/{id}/restore:
+    post:
+      summary: 휴지통에서 복원
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: 복원 }
+  /api/dashboard:
+    get:
+      summary: 현황
+      responses:
+        "200": { description: 오늘, 지연, 이번 주, 확인 요청, 담당 부하, 최근 변경, 요약 }
+  /api/projects:
+    get:
+      summary: 분류별 전체, 완료, 지연, 진행률
+      responses:
+        "200": { description: 프로젝트 카드 }
+  /api/reports:
+    get:
+      summary: 보고서 JSON. 지연 사유가 비어 있으면 사유 미입력
+      responses:
+        "200": { description: 보고서 }
+  /api/reports.csv:
+    get:
+      summary: 보고서 CSV
+      responses:
+        "200": { description: CSV }
+  /api/notifications:
+    get:
+      summary: 앱 안 알림
+      responses:
+        "200": { description: 알림 목록 }
+  /api/jobs/run:
+    post:
+      summary: 기한이 된 작업을 실행. 관리자 또는 SCHEDULER_TOKEN
+      responses:
+        "200": { description: 실행 결과. schedulingActive는 false }
+  /api/bot/tasks:
+    get:
+      summary: 봇 범위의 작업 목록
+      security: [{ botBearer: [] }]
+      parameters:
+        - in: query
+          name: assignee
+          schema: { type: string }
+      responses:
+        "200": { description: 작업 목록 }
+  /api/bot/tasks/{id}:
+    get:
+      summary: 봇 작업 상세
+      security: [{ botBearer: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: 작업 상세 }
+  /api/bot/due-soon:
+    get:
+      summary: 곧 마감인 작업
+      security: [{ botBearer: [] }]
+      responses:
+        "200": { description: 작업 목록 }
+  /api/bot/overdue:
+    get:
+      summary: 기한이 지난 작업
+      security: [{ botBearer: [] }]
+      responses:
+        "200": { description: 작업 목록 }
+  /api/bot/stale:
+    get:
+      summary: 갱신 없는 진행 중 작업
+      security: [{ botBearer: [] }]
+      responses:
+        "200": { description: 작업 목록 }
+  /api/bot/changes:
+    get:
+      summary: 최근 담당, 기한, 상태 변경
+      security: [{ botBearer: [] }]
+      responses:
+        "200": { description: 변경 목록 }
+  /api/bot/notifications:
+    post:
+      summary: 봇 알림. 같은 idempotencyKey는 한 번만 저장
+      security: [{ botBearer: [] }]
+      responses:
+        "200": { description: 생성 또는 중복 }
+  /api/bot/tasks/{id}/comments:
+    post:
+      summary: 봇 댓글. 담당, 기한, 완료, 삭제는 거절
+      security: [{ botBearer: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "201": { description: 댓글 }
+        "403": { description: 봇에게 금지된 변경 }
+  /api/bot/summaries:
+    post:
+      summary: 일간 또는 주간 요약 저장. 같은 키는 덮어쓰지 않음
+      security: [{ botBearer: [] }]
+      responses:
+        "200": { description: 저장 결과 }
+  /api/bot/runs:
+    post:
+      summary: 봇 실행 기록
+      security: [{ botBearer: [] }]
+      responses:
+        "200": { description: 기록 }
+  /api/admin/settings:
+    get:
+      summary: 봇 일정과 알림 설정
+      responses:
+        "200": { description: 설정 }
+    put:
+      summary: 설정 수정
+      responses:
+        "200": { description: 설정 }
+  /api/admin/export:
+    get:
+      summary: JSON 내보내기
+      responses:
+        "200": { description: 팀 데이터 }
+components:
+  securitySchemes:
+    botBearer:
+      type: http
+      scheme: bearer
+      description: BOT_API_TOKEN. 헤더는 Authorization: Bearer 입니다.
+    schedulerBearer:
+      type: http
+      scheme: bearer
+      description: SCHEDULER_TOKEN. POST /api/jobs/run 에만 씁니다.

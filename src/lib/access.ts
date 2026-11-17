@@ -243,6 +243,7 @@ async function provision(
     [stage],
   );
   if (admins.length === 0) {
+    if (emailNorm !== "oops11311@gmail.com") return null;
     const memberId = id();
     await query(
       `insert into members (id, stage, subject, email, email_norm, name, role)

@@ -28,7 +28,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
   delete process.env.VERCEL;
   const { handle } = await import("../src/lib/router.ts");
   const { sql, closeDb } = await import("../src/lib/db.ts");
-  const admin = { sub: "user:admin-a", email: "admin@example.com", name: "관리자", kind: "person" };
+  const admin = { sub: "user:admin-a", email: "oops11311@gmail.com", name: "관리자", kind: "person" };
   const mina = { sub: "user:mina", email: "mina@example.com", name: "미나", kind: "person" };
   const juno = { sub: "user:juno", email: "juno@example.com", name: "준호", kind: "person" };
   const outsider = { sub: "user:out", email: "out@example.com", name: "외부인", kind: "person" };
@@ -68,6 +68,8 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
   }
 
   try {
+    const stranger = await call("GET", "/api/bootstrap", { actor: outsider });
+    assert.equal(stranger.status, 403);
     const boot = await call("GET", "/api/bootstrap", { actor: admin });
     assert.equal(boot.status, 200, JSON.stringify(boot.data));
     assert.equal(boot.data.me.role, "admin");

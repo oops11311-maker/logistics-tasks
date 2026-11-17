@@ -44,6 +44,7 @@ export default function TaskPage() {
   if (!detail) return <State kind="empty">업무를 찾지 못했습니다.</State>;
   const task = detail.task;
   const editable = canWrite(me.role) && (me.role !== "member" || task.owner.id === me.id || task.collaborators.some((person) => person.id === me.id));
+  const people = members.some((person) => person.id === me.id) ? members : [{ id: me.id, name: me.name, email: me.email }, ...members];
 
   function update<K extends keyof Task>(key: K, value: Task[K]) {
     setDetail((current) => current ? { ...current, task: { ...current.task, [key]: value } } : current);
@@ -61,8 +62,10 @@ export default function TaskPage() {
           title: task.title,
           body: task.body,
           categoryId: task.categoryId,
-          ownerId: task.owner.id,
-          collaboratorIds: task.collaborators.map((person) => person.id),
+          ...(me.role === "admin" ? {
+            ownerId: task.owner.id,
+            collaboratorIds: task.collaborators.map((person) => person.id),
+          } : {}),
           startDate: task.startDate,
           dueDate: task.dueDate,
           dueTime: task.dueTime,
@@ -129,8 +132,8 @@ export default function TaskPage() {
             </select>
           </label>
           <label className="stack">담당
-            <select className="control" value={task.owner.id} disabled={!editable || !online} onChange={(event) => update("owner", { id: event.target.value, name: members.find((person) => person.id === event.target.value)?.name ?? "", email: "" })}>
-              {members.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
+            <select className="control" value={task.owner.id} disabled={me.role !== "admin" || !online} onChange={(event) => update("owner", { id: event.target.value, name: members.find((person) => person.id === event.target.value)?.name ?? "", email: "" })}>
+              {people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
             </select>
           </label>
           <label className="stack">상태
@@ -166,11 +169,11 @@ export default function TaskPage() {
           <input className="field" value={task.delayReason ?? ""} disabled={!editable || !online} onChange={(event) => update("delayReason", event.target.value)} />
         </label>
         <label className="stack">협업자
-          <select className="control" multiple value={task.collaborators.map((person) => person.id)} disabled={!editable || !online} onChange={(event) => {
+          <select className="control" multiple value={task.collaborators.map((person) => person.id)} disabled={me.role !== "admin" || !online} onChange={(event) => {
             const ids = [...event.target.selectedOptions].map((option) => option.value);
             update("collaborators", ids.map((id) => ({ id, name: members.find((person) => person.id === id)?.name ?? "", email: "" })));
           }}>
-            {members.filter((person) => person.id !== task.owner.id).map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
+            {people.filter((person) => person.id !== task.owner.id).map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
           </select>
         </label>
         <h2>체크리스트</h2>

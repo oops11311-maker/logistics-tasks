@@ -23,6 +23,8 @@ export default function ProjectBoardPage() {
   const [due, setDue] = useState("");
   const [kind, setKind] = useState<Task["workKind"]>("once");
   const [assignees, setAssignees] = useState<string[]>([]);
+  const people = members.some((person) => person.id === me.id) ? members : [{ id: me.id, name: me.name, email: me.email }, ...members];
+  const admin = me.role === "admin";
 
   function load() {
     setLoading(true);
@@ -49,7 +51,7 @@ export default function ProjectBoardPage() {
           body,
           dueDate: due || null,
           workKind: kind,
-          assigneeIds: assignees.length > 0 ? assignees : [me.id],
+          assigneeIds: admin && assignees.length > 0 ? assignees : [me.id],
         }),
       });
       setTitle("");
@@ -74,7 +76,7 @@ export default function ProjectBoardPage() {
       {canWrite(me.role) ? (
         <form className="panel" onSubmit={(event) => void publish(event)}>
           <h2>글 올리기</h2>
-          <p className="hint">고른 담당자의 내 업무에 같은 글이 들어갑니다. 담당을 비우면 나에게 들어갑니다.</p>
+          <p className="hint">{admin ? "고른 담당자의 내 업무에 들어갑니다. 비우면 내 업무에 들어갑니다." : "이 글은 내 업무에 들어갑니다. 다른 사람에게 넣으려면 관리자여야 합니다."}</p>
           <input className="field" aria-label="제목" placeholder="제목" value={title} onChange={(event) => setTitle(event.target.value)} required />
           <textarea className="field" aria-label="본문" placeholder="내용" value={body} onChange={(event) => setBody(event.target.value)} />
           <div className="filters">
@@ -86,11 +88,13 @@ export default function ProjectBoardPage() {
                 {CADENCES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
-            <label className="stack">담당
-              <select className="control" multiple aria-label="담당자" value={assignees} onChange={(event) => setAssignees([...event.target.selectedOptions].map((option) => option.value))}>
-                {members.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
-              </select>
-            </label>
+            {admin ? (
+              <label className="stack">담당
+                <select className="control" multiple aria-label="담당자" value={assignees} onChange={(event) => setAssignees([...event.target.selectedOptions].map((option) => option.value))}>
+                  {people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
+                </select>
+              </label>
+            ) : null}
             <button className="btn primary mutate" disabled={!online}>올리기</button>
           </div>
         </form>

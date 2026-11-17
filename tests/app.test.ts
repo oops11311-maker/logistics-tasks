@@ -97,14 +97,43 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
         body: "두 멤버가 함께 보는 업무",
         categoryId,
         ownerId: minaBoot.data.me.id,
-        collaboratorIds: [junoBoot.data.me.id],
         dueDate: "2026-11-19",
         priority: "높음",
       },
     });
     assert.equal(created.status, 201, JSON.stringify(created.data));
     assert.equal(created.data.task.workKind, "once");
+    assert.equal(created.data.task.owner.id, minaBoot.data.me.id);
     const taskId = created.data.task.id as string;
+    assert.equal((await call("POST", "/api/tasks", {
+      actor: mina,
+      body: { title: "남의 업무", ownerId: junoBoot.data.me.id, categoryId },
+    })).status, 403);
+    assert.equal((await call("PATCH", `/api/tasks/${taskId}`, {
+      actor: mina,
+      body: { version: created.data.task.version, ownerId: junoBoot.data.me.id },
+    })).status, 403);
+    assert.equal((await call("POST", "/api/tasks/bulk", {
+      actor: mina,
+      body: { ids: [taskId], versions: { [taskId]: created.data.task.version }, ownerId: junoBoot.data.me.id },
+    })).data.results[0].ok, false);
+    const own = await call("POST", "/api/tasks", {
+      actor: admin,
+      body: { title: "관리자 본인 업무", ownerId: boot.data.me.id },
+    });
+    assert.equal(own.status, 201, JSON.stringify(own.data));
+    assert.equal(own.data.task.owner.id, boot.data.me.id);
+    assert.equal(boot.data.members.some((person: { id: string }) => person.id === boot.data.me.id), true);
+    const adminMine = await call("GET", "/api/tasks?mine=1&limit=100", { actor: admin });
+    assert.equal(adminMine.data.items.some((item: { id: string }) => item.id === own.data.task.id), true);
+    assert.equal(adminMine.data.items.some((item: { id: string }) => item.id === taskId), false);
+    const junoBefore = await call("GET", "/api/tasks?mine=1&limit=100", { actor: juno });
+    assert.equal(junoBefore.data.items.some((item: { id: string }) => item.id === taskId), false);
+    const shared = await call("PATCH", `/api/tasks/${taskId}`, {
+      actor: admin,
+      body: { version: created.data.task.version, collaboratorIds: [junoBoot.data.me.id] },
+    });
+    assert.equal(shared.status, 200, JSON.stringify(shared.data));
     const posted = await call("POST", `/api/projects/${categoryId}/posts`, {
       actor: admin,
       body: {
@@ -125,6 +154,17 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     const seen = await call("GET", `/api/tasks/${taskId}`, { actor: juno });
     assert.equal(seen.status, 200);
     assert.equal(seen.data.task.title, "공유 입고 확인");
+    const mentionedOnly = await call("POST", "/api/tasks", {
+      actor: mina,
+      body: { title: "멘션만 있는 업무", categoryId },
+    });
+    assert.equal(mentionedOnly.status, 201);
+    await call("POST", `/api/tasks/${mentionedOnly.data.task.id}/comments`, {
+      actor: mina,
+      body: { body: "@준호 참고만 하세요" },
+    });
+    const junoMention = await call("GET", "/api/tasks?mine=1&limit=100", { actor: juno });
+    assert.equal(junoMention.data.items.some((item: { id: string }) => item.id === mentionedOnly.data.task.id), false);
     const comment = await call("POST", `/api/tasks/${taskId}/comments`, {
       actor: juno,
       body: { body: "@미나 팔레트 위치를 적어 주세요" },
@@ -285,6 +325,70 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
       body: { version: current.data.task.version, title: "덮어쓴 제목" },
     });
     assert.equal(conflict.status, 409);
+
+    const emptyBoard = await call("POST", "/api/categories", { actor: mina, body: { name: "멤버 게시판" } });
+    assert.equal(emptyBoard.status, 403);
+    const made = await call("POST", "/api/categories", { actor: admin, body: { name: "  신규 게시판  " } });
+    assert.equal(made.status, 201, JSON.stringify(made.data));
+    assert.equal(made.data.name, "신규 게시판");
+    assert.equal((await call("POST", "/api/categories", { actor: admin, body: { name: "" } })).status, 400);
+    assert.equal((await call("POST", "/api/categories", { actor: admin, body: { name: "신규 게시판" } })).status, 409);
+    const linkedPost = await call("POST", `/api/projects/${made.data.id}/posts`, {
+      actor: admin,
+      body: { title: "게시판에 남은 글", assigneeIds: [minaBoot.data.me.id] },
+    });
+    assert.equal(linkedPost.status, 201);
+    const removed = await call("DELETE", `/api/categories/${made.data.id}`, { actor: admin });
+    assert.equal(removed.status, 200, JSON.stringify(removed.data));
+    assert.equal(removed.data.archived, true);
+    assert.ok(removed.data.linked >= 1);
+    const stillThere = await call("GET", `/api/tasks/${linkedPost.data.task.id}`, { actor: mina });
+    assert.equal(stillThere.status, 200);
+    assert.equal(stillThere.data.task.title, "게시판에 남은 글");
+    const hidden = await call("GET", "/api/projects", { actor: admin });
+    assert.equal(hidden.data.items.some((item: { id: string }) => item.id === made.data.id), false);
+    const restored = await call("POST", "/api/categories", { actor: admin, body: { name: "신규 게시판" } });
+    assert.equal(restored.status, 201);
+    assert.equal(restored.data.restored, true);
+    assert.equal((await call("DELETE", `/api/categories/${made.data.id}`, { actor: mina })).status, 403);
+    assert.equal((await call("DELETE", `/api/categories/${made.data.id}`, { token: "bot-test-token" })).status, 403);
+
+    const renamed = await call("PATCH", `/api/admin/members/${minaBoot.data.me.id}`, {
+      actor: admin,
+      body: { name: "미나 김" },
+    });
+    assert.equal(renamed.status, 200);
+    const renamedState = await call("GET", "/api/admin/state", { actor: admin });
+    assert.equal(renamedState.data.members.find((item: { id: string }) => item.id === minaBoot.data.me.id).name, "미나 김");
+    assert.equal((await call("PATCH", `/api/admin/members/${junoBoot.data.me.id}`, {
+      actor: mina,
+      body: { name: "바뀌면 안 됨" },
+    })).status, 403);
+    assert.equal((await call("PATCH", `/api/admin/members/${junoBoot.data.me.id}`, {
+      token: "bot-test-token",
+      body: { name: "봇이 바꿈" },
+    })).status, 403);
+    assert.equal((await call("PATCH", `/api/admin/members/${boot.data.me.id}`, {
+      actor: admin,
+      body: { email: "other@example.com" },
+    })).status, 400);
+    assert.equal((await call("PATCH", `/api/admin/members/${boot.data.me.id}`, {
+      actor: admin,
+      body: { role: "member" },
+    })).status, 400);
+    const second = { sub: "user:admin-b", email: "admin2@example.com", name: "둘째 관리자", kind: "person" };
+    assert.equal((await call("POST", "/api/admin/invites", { actor: admin, body: { email: "admin2@example.com", role: "admin" } })).status, 201);
+    const secondBoot = await call("GET", "/api/bootstrap", { actor: second });
+    assert.equal(secondBoot.data.me.role, "admin");
+    const raced = await Promise.all([
+      call("PATCH", `/api/admin/members/${boot.data.me.id}`, { actor: admin, body: { role: "member" } }),
+      call("PATCH", `/api/admin/members/${secondBoot.data.me.id}`, { actor: second, body: { role: "member" } }),
+    ]);
+    const statuses = raced.map((item) => item.status).sort();
+    assert.deepEqual(statuses, [200, 400]);
+    const adminActor = raced[0].status === 200 ? second : admin;
+    const left = await call("GET", "/api/admin/state", { actor: adminActor });
+    assert.equal(left.data.members.filter((item: { role: string; active: boolean }) => item.role === "admin" && item.active).length, 1);
 
     const sw = await readFile(path.join(process.cwd(), "public/sw.js"), "utf8");
     assert.match(sw, /\/api\//);

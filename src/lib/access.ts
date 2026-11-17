@@ -509,35 +509,54 @@ export async function createInvite(actor: Actor, body: Record<string, unknown>):
 export async function updateMember(actor: Actor, memberId: string, body: Record<string, unknown>): Promise<void> {
   assertAdmin(actor);
   if (!isId(memberId)) throw new HttpError(400, "invalid", "멤버를 찾지 못했습니다.");
-  const rows = await sql<MemberRow>(
-    `select id, stage, subject, email, email_norm, name, role, active
-     from members where id = $1 and stage = $2`,
-    [memberId, actor.stage],
-  );
-  const member = rows[0];
-  if (!member || member.role === "bot") throw new HttpError(404, "not_found", "멤버를 찾지 못했습니다.");
-  const role = typeof body.role === "string" ? body.role : member.role;
-  const active = typeof body.active === "boolean" ? body.active : member.active;
-  if (!HUMAN_ROLES.has(role)) throw new HttpError(400, "invalid", "역할이 올바르지 않습니다.");
-  if (member.id === actor.memberId && !active) {
-    throw new HttpError(400, "invalid", "자신의 계정은 비활성화할 수 없습니다.");
-  }
-  const removingAdmin = member.role === "admin" && member.active && (role !== "admin" || !active);
-  if (removingAdmin) {
-    const admins = await sql<{ n: number }>(
-      `select count(*)::int as n from members where stage = $1 and role = 'admin' and active = true and id <> $2`,
-      [actor.stage, member.id],
+  await withTransaction(async (query) => {
+    await query(`select pg_advisory_xact_lock($1)`, [actor.stage === "preview" ? 727274112 : 727274111]);
+    const rows = await query<MemberRow>(
+      `select id, stage, subject, email, email_norm, name, role, active
+       from members where id = $1 and stage = $2`,
+      [memberId, actor.stage],
     );
-    if (Number(admins[0]?.n ?? 0) < 1) {
-      throw new HttpError(400, "invalid", "마지막 관리자의 권한은 내릴 수 없습니다.");
+    const member = rows[0];
+    if (!member || member.role === "bot") throw new HttpError(404, "not_found", "멤버를 찾지 못했습니다.");
+    const name = typeof body.name === "string" ? body.name.trim() : member.name;
+    const email = typeof body.email === "string" ? body.email.trim() : member.email;
+    const role = typeof body.role === "string" ? body.role : member.role;
+    const active = typeof body.active === "boolean" ? body.active : member.active;
+    if (name.length < 1 || name.length > 80) throw new HttpError(400, "invalid", "이름을 확인하세요.");
+    if (!EMAIL.test(email) || email.length > 200) throw new HttpError(400, "invalid", "이메일을 확인하세요.");
+    if (!HUMAN_ROLES.has(role)) throw new HttpError(400, "invalid", "역할이 올바르지 않습니다.");
+    if (member.id === actor.memberId && email.toLowerCase() !== member.email_norm) {
+      throw new HttpError(400, "invalid", "본인 이메일은 바꿀 수 없습니다.");
     }
-  }
-  await sql(
-    `update members
-     set role = $3, active = $4, deactivated_at = case when $4 then null else now() end, updated_at = now()
-     where id = $1 and stage = $2`,
-    [member.id, actor.stage, role, active],
-  );
+    if (member.id === actor.memberId && !active) {
+      throw new HttpError(400, "invalid", "자신의 계정은 비활성화할 수 없습니다.");
+    }
+    const removingAdmin = member.role === "admin" && member.active && (role !== "admin" || !active);
+    if (removingAdmin) {
+      const admins = await query<{ n: number }>(
+        `select count(*)::int as n from members where stage = $1 and role = 'admin' and active = true and id <> $2`,
+        [actor.stage, member.id],
+      );
+      if (Number(admins[0]?.n ?? 0) < 1) {
+        throw new HttpError(400, "invalid", "마지막 관리자는 역할을 내리거나 비활성화할 수 없습니다.");
+      }
+    }
+    if (email.toLowerCase() !== member.email_norm) {
+      const taken = await query<{ id: string }>(
+        `select id from members where stage = $1 and email_norm = $2 and id <> $3`,
+        [actor.stage, email.toLowerCase(), member.id],
+      );
+      if (taken[0]) throw new HttpError(409, "conflict", "이미 쓰는 이메일입니다.");
+    }
+    await query(
+      `update members
+       set name = $3, email = $4, email_norm = $5, role = $6, active = $7,
+           deactivated_at = case when $7 then null else coalesce(deactivated_at, now()) end,
+           updated_at = now()
+       where id = $1 and stage = $2`,
+      [member.id, actor.stage, name, email, email.toLowerCase(), role, active],
+    );
+  });
 }
 
 export async function listCategories(stage: string, includeArchived: boolean) {
@@ -564,10 +583,34 @@ export async function createCategory(actor: Actor, body: Record<string, unknown>
       [categoryId, actor.stage, name, Number(sort[0]?.n ?? 0) + 1],
     );
   } catch (error) {
-    if (isUniqueViolation(error)) throw new HttpError(409, "conflict", "같은 이름의 프로젝트가 있습니다.");
-    throw error;
+    if (!isUniqueViolation(error)) throw error;
+    const existing = await sql<{ id: string; archived: boolean }>(
+      `select id, archived from categories where stage = $1 and name = $2`,
+      [actor.stage, name],
+    );
+    if (existing[0]?.archived) {
+      await sql(`update categories set archived = false where id = $1 and stage = $2`, [existing[0].id, actor.stage]);
+      return { id: existing[0].id, name, restored: true };
+    }
+    throw new HttpError(409, "conflict", "같은 이름의 게시판이 있습니다.");
   }
-  return { id: categoryId, name };
+  return { id: categoryId, name, restored: false };
+}
+
+export async function archiveCategory(actor: Actor, categoryId: string) {
+  assertProjectManager(actor);
+  if (!isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 찾지 못했습니다.");
+  const rows = await sql<{ id: string }>(
+    `select id from categories where id = $1 and stage = $2`,
+    [categoryId, actor.stage],
+  );
+  if (!rows[0]) throw new HttpError(404, "not_found", "프로젝트를 찾지 못했습니다.");
+  const linked = await sql<{ n: number }>(
+    `select count(*)::int as n from tasks where stage = $1 and category_id = $2`,
+    [actor.stage, categoryId],
+  );
+  await sql(`update categories set archived = true where id = $1 and stage = $2`, [categoryId, actor.stage]);
+  return { id: categoryId, archived: true, linked: Number(linked[0]?.n ?? 0) };
 }
 
 export async function updateCategory(actor: Actor, categoryId: string, body: Record<string, unknown>) {

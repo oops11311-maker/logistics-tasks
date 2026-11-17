@@ -32,6 +32,16 @@ type StatePayload = {
 };
 
 const DAYS = [["월", 1], ["화", 2], ["수", 3], ["목", 4], ["금", 5]] as const;
+type MemberRow = { id: string; name: string; email: string; role: string; active: boolean };
+
+function memberDiffs(before: MemberRow, after: MemberRow) {
+  const rows: { label: string; from: string; to: string }[] = [];
+  if (before.name !== after.name) rows.push({ label: "이름", from: before.name, to: after.name });
+  if (before.email !== after.email) rows.push({ label: "이메일", from: before.email, to: after.email });
+  if (before.role !== after.role) rows.push({ label: "역할", from: roleLabel(before.role), to: roleLabel(after.role) });
+  if (before.active !== after.active) rows.push({ label: "상태", from: before.active ? "사용 중" : "비활성", to: after.active ? "사용 중" : "비활성" });
+  return rows;
+}
 
 export default function AdminPage() {
   const { me, online, toast, reload } = useApp();
@@ -41,6 +51,9 @@ export default function AdminPage() {
   const [role, setRole] = useState("member");
   const [holidayDay, setHolidayDay] = useState("");
   const [holidayName, setHolidayName] = useState("");
+  const [editing, setEditing] = useState<StatePayload["members"][number] | null>(null);
+  const [draft, setDraft] = useState<StatePayload["members"][number] | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
   function load() {
     api<StatePayload>("/api/admin/state").then(setData).catch((reason: Error) => setError(reason.message));
@@ -91,6 +104,26 @@ export default function AdminPage() {
     }
   }
 
+  async function saveMember() {
+    if (!editing || !draft) return;
+    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
+    const body: Record<string, unknown> = {};
+    if (editing.name !== draft.name) body.name = draft.name;
+    if (editing.email !== draft.email) body.email = draft.email;
+    if (editing.role !== draft.role) body.role = draft.role;
+    if (editing.active !== draft.active) body.active = draft.active;
+    try {
+      await api(`/api/admin/members/${editing.id}`, { method: "PATCH", mutate: true, body: JSON.stringify(body) });
+      toast("저장했습니다.");
+      setEditing(null);
+      setDraft(null);
+      setConfirming(false);
+      load();
+    } catch (reason) {
+      toast(reason instanceof Error ? reason.message : "저장하지 못했습니다.");
+    }
+  }
+
   async function runJobs() {
     if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
     try {
@@ -117,42 +150,75 @@ export default function AdminPage() {
           </select>
           <button className="btn primary mutate" disabled={!online}>초대</button>
         </form>
-        <div className="table-wrap only-pc">
+        <div className="table-wrap">
           <table className="grid">
-            <thead><tr><th>이름</th><th>이메일</th><th>역할</th><th>상태</th></tr></thead>
+            <thead><tr><th>이름</th><th>이메일</th><th>역할</th><th>상태</th><th /></tr></thead>
             <tbody>
               {data.members.map((member) => (
                 <tr key={member.id}>
                   <td>{member.name}</td>
                   <td>{member.email}</td>
-                  <td>
-                    <select className="control mutate" aria-label={`${member.name} 역할`} value={member.role} disabled={!online} onChange={(event) => void api(`/api/admin/members/${member.id}`, { method: "PATCH", mutate: true, body: JSON.stringify({ role: event.target.value }) }).then(() => { toast("저장했습니다."); load(); }).catch((reason: Error) => toast(reason.message))}>
-                      <option value="admin">관리자</option>
-                      <option value="manager">매니저</option>
-                      <option value="member">멤버</option>
-                      <option value="viewer">뷰어</option>
-                    </select>
-                  </td>
-                  <td>
-                    <button className="btn mutate" disabled={!online} onClick={() => void api(`/api/admin/members/${member.id}`, { method: "PATCH", mutate: true, body: JSON.stringify({ active: !member.active }) }).then(() => { toast("저장했습니다."); load(); }).catch((reason: Error) => toast(reason.message))}>
-                      {member.active ? "비활성화" : "다시 활성화"}
-                    </button>
-                  </td>
+                  <td>{roleLabel(member.role)}</td>
+                  <td>{member.active ? "사용 중" : "비활성"}</td>
+                  <td><button className="btn" type="button" onClick={() => { setEditing(member); setDraft({ ...member }); setConfirming(false); }}>편집</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <div className="cards">
-          {data.members.map((member) => (
-            <article key={member.id} className="mcard">
-              <strong>{member.name}</strong>
-              <span>{member.email} · {roleLabel(member.role)}</span>
-              <button className="btn mutate" disabled={!online} onClick={() => void api(`/api/admin/members/${member.id}`, { method: "PATCH", mutate: true, body: JSON.stringify({ active: !member.active }) }).then(() => { toast("저장했습니다."); load(); })}>{member.active ? "비활성화" : "다시 활성화"}</button>
-            </article>
-          ))}
-        </div>
+        <p className="hint">계정에 있는 항목은 이름, 이메일, 역할, 사용 여부입니다. 소속 팀 칸은 없습니다.</p>
         <p className="hint">대기 중 초대 {data.invites.filter((invite) => !invite.acceptedAt).length}건</p>
+        {editing && draft ? (
+          <div className="scrim" role="presentation">
+            <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="member-edit-title">
+              <h2 id="member-edit-title">{confirming ? "변경 확인" : `${editing.name} 편집`}</h2>
+              {confirming ? (
+                <>
+                  <ul className="diff">
+                    {memberDiffs(editing, draft).map((row) => (
+                      <li key={row.label}><b>{row.label}</b> {row.from} → {row.to}</li>
+                    ))}
+                  </ul>
+                  {editing.email !== draft.email ? <p className="hint">계정은 Cursor에 로그인한 이메일로 찾습니다. 저장한 이메일은 그 사람이 다음 로그인하면 Cursor 이메일로 다시 덮입니다. 로그인 자체를 다른 사람으로 바꾸지는 않습니다.</p> : null}
+                  <div className="row">
+                    <button className="btn" type="button" onClick={() => setConfirming(false)}>뒤로</button>
+                    <button className="btn primary mutate" type="button" disabled={!online} onClick={() => void saveMember()}>저장</button>
+                  </div>
+                </>
+              ) : (
+                <form onSubmit={(event) => {
+                  event.preventDefault();
+                  if (memberDiffs(editing, draft).length === 0) return toast("바꿀 내용이 없습니다.");
+                  setConfirming(true);
+                }}>
+                  <label className="stack">이름
+                    <input className="field" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required />
+                  </label>
+                  <label className="stack">이메일
+                    <input className="field" type="email" value={draft.email} disabled={editing.id === me.id} onChange={(event) => setDraft({ ...draft, email: event.target.value })} required />
+                  </label>
+                  {editing.id === me.id ? <p className="hint">본인 이메일은 바꿀 수 없습니다.</p> : null}
+                  <label className="stack">역할
+                    <select className="control" value={draft.role} onChange={(event) => setDraft({ ...draft, role: event.target.value })}>
+                      <option value="admin">관리자</option>
+                      <option value="manager">매니저</option>
+                      <option value="member">멤버</option>
+                      <option value="viewer">뷰어</option>
+                    </select>
+                  </label>
+                  <label className="check">
+                    <input type="checkbox" checked={draft.active} disabled={editing.id === me.id} onChange={(event) => setDraft({ ...draft, active: event.target.checked })} />
+                    사용 중
+                  </label>
+                  <div className="row">
+                    <button className="btn" type="button" onClick={() => { setEditing(null); setDraft(null); setConfirming(false); }}>취소</button>
+                    <button className="btn primary" type="submit">확인</button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        ) : null}
       </section>
       <section className="panel">
         <h2>봇 범위와 주기</h2>

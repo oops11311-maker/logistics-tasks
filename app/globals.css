@@ -151,6 +151,39 @@ pre.copy { white-space: pre-wrap; font-family: inherit; font-size: 13px; backgro
 
 .is-offline .mutate { pointer-events: none; opacity: .5; }
 
+.filter-bar { display: flex; align-items: center; gap: 8px; margin: 12px 0 8px; min-width: 0; }
+.filter-bar .segment { display: flex; gap: 6px; min-width: 0; overflow-x: auto; flex: 1 1 auto; }
+.filter-bar .tab { flex: 0 0 auto; }
+.filter-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.filter-pop { position: relative; }
+.filter-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 6;
+  width: min(220px, calc(100vw - 28px));
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
+  display: grid; gap: 6px; box-shadow: 0 8px 24px rgba(28, 25, 21, .12);
+}
+.filter-menu .tab { width: 100%; text-align: left; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.filter-chips .chip { border: 1px solid var(--line); min-height: 32px; padding: 0 10px; }
+.btn.on { background: var(--ink); color: white; border-color: var(--ink); }
+.scrim {
+  position: fixed; inset: 0; z-index: 30; background: rgba(28, 25, 21, .4);
+  display: flex; align-items: flex-end; justify-content: center; padding: 12px 12px 88px;
+}
+.dialog {
+  width: min(440px, 100%); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.dialog h2 { margin: 0; font-size: 16px; }
+.dialog .field, .dialog select.control { width: 100%; }
+.diff { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+@media (max-width: 800px) {
+  .filter-bar .tab, .filter-actions .btn { padding: 0 8px; font-size: 13px; }
+}
+@media (min-width: 801px) {
+  .scrim { align-items: center; padding: 24px; }
+}
+
 @media (max-width: 800px) {
   .app { display: block; }
   .side { display: none; }

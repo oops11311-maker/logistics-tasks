@@ -1,6 +1,7 @@
 import {
   assertAdmin,
   botActor,
+  archiveCategory,
   createCategory,
   createInvite,
   hasAppToken,
@@ -151,12 +152,14 @@ async function projectStats(actor: Actor, now: Date) {
     total: number;
     done: number;
     overdue: number;
+    linked: number;
     latest_title: string | null;
     latest_at: unknown;
     latest_owner: string | null;
   }>(
     `select c.id, c.name,
         count(t.id) filter (where t.deleted_at is null and t.is_template = false)::int as total,
+        count(t.id)::int as linked,
         count(t.id) filter (where t.status = '완료' and t.deleted_at is null and t.is_template = false)::int as done,
         count(t.id) filter (
           where t.status <> '완료' and t.deleted_at is null and t.is_template = false and t.due_at < $2::timestamptz
@@ -186,6 +189,7 @@ async function projectStats(actor: Actor, now: Date) {
       total,
       done,
       overdue: Number(row.overdue),
+      linked: Number(row.linked),
       progress: total === 0 ? 0 : done / total,
       latestTitle: row.latest_title,
       latestAt: asIso(row.latest_at),
@@ -499,6 +503,9 @@ async function humanRoute(request: Request, method: string, path: string[], url:
   if (path[0] === "categories" && path[1] && method === "PATCH") {
     await updateCategory(actor, path[1], await readJson(request));
     return json({ ok: true });
+  }
+  if (path[0] === "categories" && path[1] && method === "DELETE") {
+    return json(await archiveCategory(actor, path[1]));
   }
   if (path[0] === "admin") return adminRoute(actor, method, path.slice(1), request, now);
   return json({ error: "not_found", message: "없는 주소입니다." }, 404);

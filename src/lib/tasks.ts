@@ -287,10 +287,8 @@ function canEdit(actor: Actor, row: { owner_id: string }, collaboratorIds: strin
   return actor.role === "member" && assigned(actor, row, collaboratorIds);
 }
 
-function canReassign(actor: Actor, row: { owner_id: string }): boolean {
-  if (actor.kind !== "human") return false;
-  if (actor.role === "admin" || actor.role === "manager") return true;
-  return actor.role === "member" && row.owner_id === actor.memberId;
+function canReassign(actor: Actor): boolean {
+  return actor.kind === "human" && actor.role === "admin";
 }
 
 function canComplete(actor: Actor, row: { owner_id: string }, collaboratorIds: string[]): boolean {
@@ -610,6 +608,10 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
   const collaboratorIds = Array.isArray(body.collaboratorIds) ? [...new Set(body.collaboratorIds.map(String))] : [];
   if (!isId(ownerId) || collaboratorIds.some((item) => !isId(item))) {
     throw new HttpError(400, "invalid", "담당자 또는 협업자를 확인하세요.");
+  }
+  const assignsSomeoneElse = ownerId !== actor.memberId || collaboratorIds.some((item) => item !== actor.memberId);
+  if (assignsSomeoneElse && !canReassign(actor)) {
+    throw new HttpError(403, "forbidden", "다른 사람에게 업무를 넣으려면 관리자여야 합니다.");
   }
   const categoryId = typeof body.categoryId === "string" && body.categoryId ? body.categoryId : null;
   if (categoryId && !isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 확인하세요.");
@@ -1051,7 +1053,7 @@ export async function updateTask(actor: Actor, taskId: string, body: Record<stri
       throw new HttpError(403, "forbidden", "완료 처리할 권한이 없습니다.");
     }
     const nextOwner = body.ownerId == null ? row.owner_id : String(body.ownerId);
-    if (nextOwner !== row.owner_id && !canReassign(actor, row)) {
+    if (nextOwner !== row.owner_id && !canReassign(actor)) {
       throw new HttpError(403, "forbidden", "담당자를 바꿀 권한이 없습니다.");
     }
     if (!isId(nextOwner)) throw new HttpError(400, "invalid", "담당자를 확인하세요.");
@@ -1060,8 +1062,8 @@ export async function updateTask(actor: Actor, taskId: string, body: Record<stri
       : [...new Set((body.collaboratorIds as unknown[]).map(String))];
     const sameCollaborators = [...nextCollaborators].filter((item) => item !== nextOwner).sort().join()
       === [...collaboratorIds].sort().join();
-    if (!sameCollaborators && !canReassign(actor, row)) {
-      throw new HttpError(403, "forbidden", "협업자를 바꿀 권한이 없습니다.");
+    if (!sameCollaborators && !canReassign(actor)) {
+      throw new HttpError(403, "forbidden", "담당자를 바꿀 권한이 없습니다.");
     }
     if (nextCollaborators.some((item) => !isId(item))) throw new HttpError(400, "invalid", "협업자를 확인하세요.");
     await assertMembers(actor.stage, [nextOwner, ...nextCollaborators.filter((item) => item !== nextOwner)], query);

@@ -85,7 +85,7 @@ function TeamInner() {
   return (
     <div>
       <div className="tabs">
-        {[["list", "목록"], ["kanban", "칸반"], ["calendar", "달력"]].map(([key, label]) => (
+        {[["list", "목록"], ["kanban", "상태별 보기"], ["calendar", "달력"]].map(([key, label]) => (
           <button key={key} className={view === key ? "tab on" : "tab"} onClick={() => setParam("view", key)}>{label}</button>
         ))}
       </div>
@@ -125,7 +125,7 @@ function TeamInner() {
             {STATUSES.map((status) => <option key={status}>{status}</option>)}
           </select>
           <button className="btn mutate" disabled={!online} onClick={() => void applyBulk("status")}>상태 적용</button>
-          {me.role === "admin" || me.role === "manager" ? (
+          {me.role === "admin" ? (
             <>
               <select className="control" value={bulkOwner} onChange={(event) => setBulkOwner(event.target.value)} aria-label="일괄 담당자">
                 <option value="">담당자</option>

@@ -197,6 +197,34 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     const onceList = await call("GET", "/api/tasks?mine=1&kind=once&limit=100", { actor: mina });
     assert.equal(dailyList.data.items.some((item: { title: string }) => item.title === "아침 점검"), true);
     assert.equal(onceList.data.items.some((item: { title: string }) => item.title === "아침 점검"), false);
+    const weekly = await call("POST", "/api/tasks", {
+      actor: mina,
+      body: { title: "주간 정산", workKind: "weekly", categoryId, dueDate: "2026-11-20" },
+    });
+    assert.equal(weekly.status, 201, JSON.stringify(weekly.data));
+    assert.equal(weekly.data.task.workKind, "weekly");
+    assert.equal(weekly.data.task.recurrence.freq, "weekly");
+    const weekList = await call("GET", "/api/tasks?kind=weekly&limit=50", { actor: mina });
+    assert.equal(weekList.data.items.some((item: { title: string }) => item.title === "주간 정산"), true);
+    const yearly = await call("POST", "/api/tasks", {
+      actor: mina,
+      body: { title: "연간 계약", workKind: "yearly", dueDate: "2026-11-20" },
+    });
+    assert.equal(yearly.status, 201, JSON.stringify(yearly.data));
+    assert.equal(yearly.data.task.recurrence.nextRunOn, "2027-11-20");
+    const moved = await call("PATCH", `/api/tasks/${weekly.data.task.id}`, {
+      actor: mina,
+      body: { version: weekly.data.task.version, workKind: "monthly" },
+    });
+    assert.equal(moved.status, 200, JSON.stringify(moved.data));
+    assert.equal(moved.data.task.workKind, "monthly");
+    assert.equal(moved.data.task.recurrence.freq, "monthly");
+    const focus = await call("GET", "/api/focus", { actor: admin });
+    assert.equal(focus.status, 200, JSON.stringify(focus.data));
+    const minaFocus = focus.data.people.find((item: { id: string }) => item.id === minaBoot.data.me.id);
+    assert.ok(minaFocus);
+    assert.equal(minaFocus.onTime <= minaFocus.doneWithDue, true);
+    assert.equal((await call("GET", "/api/focus", { actor: outsider })).status, 403);
 
     const now = seoulToUtc("2026-11-18", 9, 30).toISOString();
     const firstRun = await call("POST", "/api/jobs/webhook", {

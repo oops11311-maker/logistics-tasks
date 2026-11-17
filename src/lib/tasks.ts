@@ -17,7 +17,13 @@ import {
 
 const PRIORITIES = new Set(["긴급", "높음", "보통", "낮음"]);
 const STATUSES = new Set(["할 일", "진행 중", "확인 요청", "보류", "완료"]);
-const FREQS = new Set(["daily", "weekly", "monthly"]);
+const FREQS = new Set(["daily", "weekly", "monthly", "yearly"]);
+export type Cadence = "once" | "daily" | "weekly" | "monthly" | "yearly";
+const CADENCES = new Set<Cadence>(["once", "daily", "weekly", "monthly", "yearly"]);
+
+export function asCadence(value: unknown): Cadence {
+  return value === "daily" || value === "weekly" || value === "monthly" || value === "yearly" ? value : "once";
+}
 
 type TaskRow = {
   id: string;
@@ -88,7 +94,7 @@ export type TaskDto = {
   updatedAt: string | null;
   overdue: boolean;
   recurring: boolean;
-  workKind: "daily" | "once";
+  workKind: Cadence;
   templateId: string | null;
   recurrence: {
     freq: string;
@@ -221,7 +227,7 @@ export function toDto(
     updatedAt: asIso(row.updated_at),
     overdue: Boolean(dueAt && !deletedAt && status !== "완료" && new Date(dueAt).getTime() < now.getTime()),
     recurring: Boolean(row.template_id),
-    workKind: row.work_kind === "daily" ? "daily" : "once",
+    workKind: asCadence(row.work_kind),
     templateId: row.template_id,
     recurrence,
   };
@@ -311,7 +317,7 @@ export type TaskFilters = {
   mine?: boolean;
   open?: boolean;
   trash?: boolean;
-  kind?: "daily" | "once";
+  kind?: Cadence;
   sort?: "new";
   limit: number;
   offset: number;
@@ -387,8 +393,7 @@ export async function listTasks(actor: Actor, filters: TaskFilters, now = new Da
   }
   if (filters.dueFrom) add("to_char(t.due_date, 'YYYY-MM-DD') >= $?", filters.dueFrom);
   if (filters.dueTo) add("to_char(t.due_date, 'YYYY-MM-DD') <= $?", filters.dueTo);
-  if (filters.kind === "daily") where.push("t.work_kind = 'daily'");
-  if (filters.kind === "once") where.push("t.work_kind = 'once'");
+  if (filters.kind) add("t.work_kind = $?", filters.kind);
   const whereSql = where.join(" and ");
   const totalRows = await sql<{ n: number }>(
     `select count(*)::int as n from tasks t where ${whereSql}`,
@@ -538,7 +543,9 @@ function nextDate(
   if (freq === "daily" && businessDaysOnly) next = shiftBusinessDays(from, interval, holidays, excludeHolidays);
   else if (freq === "daily") next = addDays(from, interval);
   else if (freq === "weekly") next = addDays(from, 7 * interval);
-  else next = addMonths(from, interval, dom);
+  else if (freq === "monthly") next = addMonths(from, interval, dom);
+  else if (freq === "yearly") next = addMonths(from, 12 * interval, dom);
+  else return null;
   if (next === from) return null;
   if (until && next > until) return null;
   return next;
@@ -606,9 +613,10 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
   }
   const categoryId = typeof body.categoryId === "string" && body.categoryId ? body.categoryId : null;
   if (categoryId && !isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 확인하세요.");
-  const workKind = body.workKind === "daily" || body.workKind === "once"
-    ? body.workKind
-    : "once";
+  if (body.workKind !== undefined && !CADENCES.has(body.workKind as Cadence)) {
+    throw new HttpError(400, "invalid", "반복 구분이 올바르지 않습니다.");
+  }
+  const explicitKind = body.workKind === undefined ? null : asCadence(body.workKind);
   let recurrence: { freq: string; interval: number; businessDaysOnly: boolean; until: string | null } | null = null;
   if (body.recurrence && typeof body.recurrence === "object") {
     const record = body.recurrence as Record<string, unknown>;
@@ -625,6 +633,16 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
       until: optionalDate(record.until, "반복 종료"),
     };
   }
+  if (!recurrence && explicitKind && explicitKind !== "once") {
+    if (!dueDate) throw new HttpError(400, "invalid", "반복 업무에는 마감일이 필요합니다.");
+    recurrence = {
+      freq: explicitKind,
+      interval: 1,
+      businessDaysOnly: explicitKind === "daily",
+      until: null,
+    };
+  }
+  const workKind = explicitKind ?? asCadence(recurrence?.freq);
   const dueAt = dueInstant(dueDate, dueTime);
   const completedAt = status === "완료" ? now.toISOString() : null;
   const taskId = await withTransaction(async (query) => {
@@ -663,7 +681,7 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
         templateId: null,
         occurrenceKey: null,
         isTemplate: false,
-        workKind: recurrenceKind(workKind, null),
+        workKind,
       });
       await replaceCollaborators(query, createdId, collaboratorIds.filter((item) => item !== ownerId));
       await writeEvent(query, actor.stage, createdId, actor, "create", "status", null, status);
@@ -672,7 +690,6 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
     }
     if (!dueDate) throw new HttpError(400, "invalid", "반복 업무에는 마감일이 필요합니다.");
     const templateId = id();
-    const kind = recurrenceKind(workKind, recurrence);
     const following = nextDate(
       recurrence.freq,
       recurrence.interval,
@@ -716,7 +733,7 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
         Number(dueDate.slice(8, 10)),
         recurrence.until,
         following,
-        kind,
+        workKind,
       ],
     );
     await replaceCollaborators(query, templateId, collaboratorIds.filter((item) => item !== ownerId));
@@ -743,7 +760,7 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
       templateId,
       occurrenceKey: dueDate,
       isTemplate: false,
-      workKind: kind,
+      workKind,
     });
     await replaceCollaborators(query, createdId, collaboratorIds.filter((item) => item !== ownerId));
     await writeEvent(query, actor.stage, createdId, actor, "create", "status", null, "할 일");
@@ -792,13 +809,8 @@ type InsertInput = {
   templateId: string | null;
   occurrenceKey: string | null;
   isTemplate: boolean;
-  workKind: "daily" | "once";
+  workKind: Cadence;
 };
-
-function recurrenceKind(chosen: "daily" | "once", recurrence: { freq: string } | null): "daily" | "once" {
-  if (chosen === "daily" || recurrence?.freq === "daily") return "daily";
-  return "once";
-}
 
 async function notifyAssignees(
   query: QueryFn,
@@ -901,7 +913,7 @@ export async function spawnOccurrence(
     templateId: template.id,
     occurrenceKey: dueDate,
     isTemplate: false,
-    workKind: template.work_kind === "daily" || template.recurrence_freq === "daily" ? "daily" : "once",
+    workKind: template.work_kind && template.work_kind !== "once" ? asCadence(template.work_kind) : asCadence(template.recurrence_freq),
   });
   if (!created) return null;
   const collabs = await query<{ member_id: string }>(
@@ -930,6 +942,80 @@ export function followingDate(
     holidays,
     excludeHolidays,
   );
+}
+
+async function syncCadence(query: QueryFn, actor: Actor, row: TaskRow, workKind: Cadence, dueDate: string | null) {
+  if (workKind === "once") {
+    if (row.template_id) {
+      await query(
+        `update tasks set next_run_on = null, updated_at = now() where id = $1 and stage = $2 and is_template = true`,
+        [row.template_id, actor.stage],
+      );
+    }
+    return;
+  }
+  if (!dueDate) throw new HttpError(400, "invalid", "반복 업무에는 마감일이 필요합니다.");
+  const holidays = await loadHolidays(actor.stage, query);
+  const settings = await loadSettings(actor.stage, query);
+  const following = nextDate(
+    workKind,
+    1,
+    workKind === "daily",
+    Number(dueDate.slice(8, 10)),
+    dueDate,
+    null,
+    holidays,
+    settings.excludeHolidays,
+  );
+  if (row.template_id) {
+    await query(
+      `update tasks set recurrence_freq = $3, recurrence_interval = 1, recurrence_business_days = $4,
+         recurrence_dom = $5, next_run_on = $6::date, work_kind = $3, updated_at = now()
+       where id = $1 and stage = $2 and is_template = true`,
+      [row.template_id, actor.stage, workKind, workKind === "daily", Number(dueDate.slice(8, 10)), following],
+    );
+    return;
+  }
+  const templateId = id();
+  await query(
+    `insert into tasks (
+       id, stage, title, body, category_id, owner_id, creator_id, due_date, due_time, due_at,
+       priority, status, checklist, tags, links, is_template, work_kind,
+       recurrence_freq, recurrence_interval, recurrence_business_days, recurrence_dom, next_run_on
+     ) values (
+       $1,$2,$3,$4,$5,$6,$7,$8::date,$9,$10,$11,'할 일',$12::jsonb,$13::jsonb,$14::jsonb,true,$15,
+       $15,1,$16,$17,$18::date
+     )`,
+    [
+      templateId,
+      actor.stage,
+      row.title,
+      row.body,
+      row.category_id,
+      row.owner_id,
+      row.creator_id,
+      dueDate,
+      row.due_time,
+      asIso(row.due_at),
+      row.priority,
+      JSON.stringify(asJson(row.checklist, [])),
+      JSON.stringify(asJson(row.tags, [])),
+      JSON.stringify(asJson(row.links, [])),
+      workKind,
+      workKind === "daily",
+      Number(dueDate.slice(8, 10)),
+      following,
+    ],
+  );
+  await query(
+    `update tasks set template_id = $3, occurrence_key = $4 where id = $1 and stage = $2`,
+    [row.id, actor.stage, templateId, dueDate],
+  );
+  const collabs = await query<{ member_id: string }>(
+    `select member_id from task_collaborators where task_id = $1`,
+    [row.id],
+  );
+  await replaceCollaborators(query, templateId, collabs.map((item) => item.member_id));
 }
 
 async function conflict(query: QueryFn, stage: string, taskId: string): Promise<never> {
@@ -993,10 +1079,14 @@ export async function updateTask(actor: Actor, taskId: string, body: Record<stri
     const tags = body.tags === undefined ? asJson<string[]>(row.tags, []) : parseTags(body.tags);
     const links = body.links === undefined ? asJson<LinkItem[]>(row.links, []) : parseLinks(body.links);
     const categoryId = body.categoryId === undefined ? row.category_id : (body.categoryId ? String(body.categoryId) : null);
-    const workKind = body.workKind === undefined
-      ? (row.work_kind === "daily" ? "daily" : "once")
-      : body.workKind === "daily" ? "daily" : body.workKind === "once" ? "once" : null;
-    if (!workKind) throw new HttpError(400, "invalid", "업무 구분이 올바르지 않습니다.");
+    if (body.workKind !== undefined && !CADENCES.has(body.workKind as Cadence)) {
+      throw new HttpError(400, "invalid", "반복 구분이 올바르지 않습니다.");
+    }
+    const workKind = body.workKind === undefined ? asCadence(row.work_kind) : asCadence(body.workKind);
+    if (workKind !== "once" && workKind !== asCadence(row.work_kind)) {
+      const anchor = body.dueDate === undefined ? asDate(row.due_date) : optionalDate(body.dueDate, "마감");
+      if (!anchor) throw new HttpError(400, "invalid", "반복 업무에는 마감일이 필요합니다.");
+    }
     if (categoryId && !isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 확인하세요.");
     if (categoryId && categoryId !== row.category_id) {
       const categories = await query<{ id: string }>(
@@ -1041,6 +1131,11 @@ export async function updateTask(actor: Actor, taskId: string, body: Record<stri
       ],
     );
     if (!updated[0]) await conflict(query, actor.stage, taskId);
+    if (workKind !== asCadence(row.work_kind)) {
+      if (workKind !== "once" && !dueDate) throw new HttpError(400, "invalid", "반복 업무에는 마감일이 필요합니다.");
+      await syncCadence(query, actor, updated[0], workKind, dueDate);
+      await writeEvent(query, actor.stage, taskId, actor, "cadence", "cadence", asCadence(row.work_kind), workKind);
+    }
     await replaceCollaborators(query, taskId, nextCollaborators.filter((item) => item !== nextOwner));
     if (nextStatus !== row.status) {
       await writeEvent(query, actor.stage, taskId, actor, "status", "status", row.status, nextStatus);

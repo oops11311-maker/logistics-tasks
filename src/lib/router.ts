@@ -32,7 +32,7 @@ import {
   readJson,
 } from "./http";
 import { botScope, describeJobs, recordExternalRun, runScheduler, saveBotAlert, saveBotSummary } from "./jobs";
-import { buildReport } from "./reports";
+import { buildFocus, buildReport } from "./reports";
 import {
   addComment,
   bulkUpdate,
@@ -97,6 +97,16 @@ function rejectBotMutation(body: Record<string, unknown>): void {
   }
 }
 
+function cadenceFilter(url: URL) {
+  const kind = url.searchParams.get("kind");
+  const kinds = ["once", "daily", "weekly", "monthly", "yearly"] as const;
+  if (!kind) return undefined;
+  if (!kinds.includes(kind as (typeof kinds)[number])) {
+    throw new HttpError(400, "invalid", "반복 구분이 올바르지 않습니다.");
+  }
+  return kind as (typeof kinds)[number];
+}
+
 function filtersFrom(url: URL): TaskFilters {
   const q = url.searchParams.get("q") ?? undefined;
   if (q && q.length > 100) throw new HttpError(400, "invalid", "검색어가 너무 깁니다.");
@@ -127,7 +137,7 @@ function filtersFrom(url: URL): TaskFilters {
     mine: url.searchParams.get("mine") === "1",
     open: url.searchParams.get("open") === "1",
     trash: url.searchParams.get("trash") === "1",
-    kind: url.searchParams.get("kind") === "daily" ? "daily" : url.searchParams.get("kind") === "once" ? "once" : undefined,
+    kind: cadenceFilter(url),
     sort: url.searchParams.get("sort") === "new" ? "new" : undefined,
     limit: queryNumber(url.searchParams.get("limit"), 50, 100),
     offset: queryNumber(url.searchParams.get("offset"), 0, 5000),
@@ -436,6 +446,10 @@ async function humanRoute(request: Request, method: string, path: string[], url:
       sort: "new",
     }, now);
     return json({ project, posts: posts.items });
+  }
+  if (path[0] === "focus" && method === "GET") {
+    if (actor.role === "bot") throw new HttpError(403, "forbidden", "효율을 볼 권한이 없습니다.");
+    return json(await buildFocus(actor, now));
   }
   if (path[0] === "reports" && method === "GET") {
     if (actor.role === "bot") throw new HttpError(403, "forbidden", "보고서를 볼 권한이 없습니다.");

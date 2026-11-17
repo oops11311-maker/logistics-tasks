@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, ApiError, canWrite, formatWhen, PRIORITIES, STATUSES, type Task } from "@/components/api";
+import { api, ApiError, CADENCES, canWrite, formatWhen, PRIORITIES, STATUSES, type Task } from "@/components/api";
 import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
 
@@ -13,7 +13,7 @@ type Detail = {
   events: { id: string; action: string; field: string | null; oldValue: string | null; newValue: string | null; actorKind: string; actorName: string; createdAt: string | null }[];
 };
 
-const ACTION: Record<string, string> = { create: "생성", status: "상태", assignee: "담당자", due: "마감", trash: "휴지통", restore: "복원", complete: "완료", reopen: "다시 열기" };
+const ACTION: Record<string, string> = { create: "생성", status: "상태", assignee: "담당자", due: "마감", cadence: "반복", trash: "휴지통", restore: "복원", complete: "완료", reopen: "다시 열기" };
 
 export default function TaskPage() {
   const params = useParams<{ id: string }>();
@@ -143,10 +143,9 @@ export default function TaskPage() {
               {PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}
             </select>
           </label>
-          <label className="stack">구분
-            <select className="control" value={task.workKind} disabled={!editable || !online} onChange={(event) => update("workKind", event.target.value === "daily" ? "daily" : "once")}>
-              <option value="daily">데일리업무</option>
-              <option value="once">1회성 업무</option>
+          <label className="stack">반복
+            <select className="control" value={task.workKind} disabled={!editable || !online} onChange={(event) => update("workKind", event.target.value as Task["workKind"])}>
+              {CADENCES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
           <label className="stack">시작

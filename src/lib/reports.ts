@@ -180,6 +180,122 @@ export async function buildReport(actor: Actor, now = new Date()): Promise<Repor
   return { ...report, ...rendered };
 }
 
+export type FocusPerson = {
+  id: string;
+  name: string;
+  href: string;
+  open: number;
+  overdue: number;
+  doneThisWeek: number;
+  doneWithDue: number;
+  onTime: number;
+  onceOpen: number;
+  dailyOpen: number;
+  weeklyOpen: number;
+  monthlyOpen: number;
+  yearlyOpen: number;
+  repeatDue: number;
+  repeatDone: number;
+  projects: number;
+  topProject: string | null;
+  topProjectCount: number;
+};
+
+export async function buildFocus(actor: Actor, now = new Date()) {
+  const today = seoulDate(now);
+  const weekStart = startOfWeek(today);
+  const weekEnd = endOfWeek(today);
+  const nextStart = addDays(weekStart, 7);
+  const weekFrom = seoulToUtc(weekStart, 0, 0, 0, 0).toISOString();
+  const nextFrom = seoulToUtc(nextStart, 0, 0, 0, 0).toISOString();
+  const people = await sql<{
+    id: string;
+    name: string;
+    open: number;
+    overdue: number;
+    done_this_week: number;
+    done_with_due: number;
+    on_time: number;
+    once_open: number;
+    daily_open: number;
+    weekly_open: number;
+    monthly_open: number;
+    yearly_open: number;
+    repeat_due: number;
+    repeat_done: number;
+  }>(
+    `select m.id, m.name,
+        count(t.id) filter (where t.status <> '완료')::int as open,
+        count(t.id) filter (where t.status <> '완료' and t.due_at < $2::timestamptz)::int as overdue,
+        count(t.id) filter (where t.status = '완료' and t.completed_at >= $3::timestamptz and t.completed_at < $4::timestamptz)::int as done_this_week,
+        count(t.id) filter (where t.status = '완료' and t.completed_at >= $3::timestamptz and t.completed_at < $4::timestamptz and t.due_at is not null)::int as done_with_due,
+        count(t.id) filter (where t.status = '완료' and t.completed_at >= $3::timestamptz and t.completed_at < $4::timestamptz and t.due_at is not null and t.completed_at <= t.due_at)::int as on_time,
+        count(t.id) filter (where t.status <> '완료' and t.work_kind = 'once')::int as once_open,
+        count(t.id) filter (where t.status <> '완료' and t.work_kind = 'daily')::int as daily_open,
+        count(t.id) filter (where t.status <> '완료' and t.work_kind = 'weekly')::int as weekly_open,
+        count(t.id) filter (where t.status <> '완료' and t.work_kind = 'monthly')::int as monthly_open,
+        count(t.id) filter (where t.status <> '완료' and t.work_kind = 'yearly')::int as yearly_open,
+        count(t.id) filter (where t.work_kind <> 'once' and to_char(t.due_date, 'YYYY-MM-DD') >= $5 and to_char(t.due_date, 'YYYY-MM-DD') <= $6)::int as repeat_due,
+        count(t.id) filter (where t.work_kind <> 'once' and t.status = '완료' and to_char(t.due_date, 'YYYY-MM-DD') >= $5 and to_char(t.due_date, 'YYYY-MM-DD') <= $6)::int as repeat_done
+     from members m
+     left join tasks t
+       on t.owner_id = m.id and t.stage = m.stage and t.deleted_at is null and t.is_template = false
+     where m.stage = $1 and m.active = true and m.role <> 'bot'
+     group by m.id, m.name
+     order by m.name`,
+    [actor.stage, now.toISOString(), weekFrom, nextFrom, weekStart, weekEnd],
+  );
+  const buckets = await sql<{ owner_id: string; category_name: string | null; n: number }>(
+    `select t.owner_id, c.name as category_name, count(*)::int as n
+     from tasks t
+     left join categories c on c.id = t.category_id
+     where t.stage = $1 and t.deleted_at is null and t.is_template = false and t.status <> '완료'
+     group by t.owner_id, c.name`,
+    [actor.stage],
+  );
+  const byOwner = new Map<string, { projects: number; topProject: string | null; topProjectCount: number }>();
+  for (const row of people) byOwner.set(row.id, { projects: 0, topProject: null, topProjectCount: 0 });
+  for (const row of buckets) {
+    const slot = byOwner.get(row.owner_id);
+    if (!slot) continue;
+    slot.projects += 1;
+    if (row.n > slot.topProjectCount) {
+      slot.topProjectCount = row.n;
+      slot.topProject = row.category_name ?? "프로젝트 없음";
+    }
+  }
+  return {
+    generatedAt: now.toISOString(),
+    timezone: "Asia/Seoul" as const,
+    week: { start: weekStart, end: weekEnd },
+    note: "숫자는 저장된 업무만 셉니다. 기한 내 완료는 마감이 있는 이번 주 완료 건입니다. 반복 이행은 이번 주 마감인 반복 업무 중 완료된 건입니다. 업무 집중은 열린 업무 중 가장 많은 프로젝트가 차지하는 비율입니다.",
+    people: people.map((row) => {
+      const focus = byOwner.get(row.id) ?? { projects: 0, topProject: null, topProjectCount: 0 };
+      const item: FocusPerson = {
+        id: row.id,
+        name: row.name,
+        href: `/team?assigneeId=${row.id}`,
+        open: Number(row.open),
+        overdue: Number(row.overdue),
+        doneThisWeek: Number(row.done_this_week),
+        doneWithDue: Number(row.done_with_due),
+        onTime: Number(row.on_time),
+        onceOpen: Number(row.once_open),
+        dailyOpen: Number(row.daily_open),
+        weeklyOpen: Number(row.weekly_open),
+        monthlyOpen: Number(row.monthly_open),
+        yearlyOpen: Number(row.yearly_open),
+        repeatDue: Number(row.repeat_due),
+        repeatDone: Number(row.repeat_done),
+        projects: focus.projects,
+        topProject: focus.topProject,
+        topProjectCount: focus.topProjectCount,
+      };
+      return item;
+    }),
+  };
+}
+
 export async function dailySummary(stage: string, now = new Date()): Promise<{ periodKey: string; body: string }> {
   const today = seoulDate(now);
   const actor = { stage } as Actor;

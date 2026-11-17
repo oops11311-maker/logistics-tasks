@@ -36,6 +36,7 @@ const LINKS = [
   ["/team", "팀 업무"],
   ["/projects", "프로젝트"],
   ["/reports", "보고서"],
+  ["/focus", "효율"],
 ];
 
 export function Shell({ children }: { children: React.ReactNode }) {
@@ -141,7 +142,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   }, [phase]);
 
   const title = LINKS.find((item) => item[0] === pathname)?.[1]
-    ?? (pathname.startsWith("/tasks/") ? "업무" : pathname.startsWith("/admin") ? "관리" : "물류자동화 업무");
+    ?? (pathname.startsWith("/tasks/") ? "업무" : pathname.startsWith("/admin") ? "관리" : pathname.startsWith("/focus") ? "효율" : "물류자동화 업무");
 
   if (phase === "loading") return <p className="state">불러오는 중…</p>;
   if (phase === "login") {
@@ -231,6 +232,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         {more ? (
           <div className="more">
             <Link href="/projects">프로젝트</Link>
+            <Link href="/focus">효율</Link>
             {me.role === "admin" ? <Link href="/admin">관리</Link> : null}
             <button className="navish" type="button" onClick={() => setOpenNotes(true)}>알림 {unread}</button>
             {install ? <button className="navish" type="button" onClick={() => void install.prompt()}>앱 설치</button> : <p className="hint">브라우저 메뉴에서 홈 화면에 추가하세요.</p>}

@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
-import { api, canWrite, PRIORITIES, STATUSES, type Task } from "@/components/api";
-import { changeStatus, State, TaskTables } from "@/components/bits";
+import { api, CADENCES, cadenceLabel, canWrite, PRIORITIES, STATUSES, type Task } from "@/components/api";
+import { changeCadence, changeStatus, State, TaskTables } from "@/components/bits";
 import { useApp } from "@/components/shell";
 
 function TeamInner() {
@@ -107,10 +107,9 @@ function TeamInner() {
           <option value="">우선순위 전체</option>
           {PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}
         </select>
-        <select className="control" aria-label="업무 구분" value={params.get("kind") ?? ""} onChange={(event) => setParam("kind", event.target.value)}>
-          <option value="">데일리·1회성</option>
-          <option value="daily">데일리업무</option>
-          <option value="once">1회성 업무</option>
+        <select className="control" aria-label="반복" value={params.get("kind") ?? ""} onChange={(event) => setParam("kind", event.target.value)}>
+          <option value="">반복 전체</option>
+          {CADENCES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select>
         <select className="control" aria-label="마감" value={params.get("due") ?? ""} onChange={(event) => setParam("due", event.target.value)}>
           <option value="">마감 전체</option>
@@ -145,7 +144,7 @@ function TeamInner() {
               {items.filter((task) => task.status === status).map((task) => (
                 <article key={task.id} className="kcard">
                   <Link href={task.href}><strong>{task.title}</strong></Link>
-                  <div className="sub">{task.workKind === "daily" ? "데일리" : "1회성"} · {task.owner.name} · {task.dueDate ?? "마감 없음"}</div>
+                  <div className="sub">{cadenceLabel(task.workKind)} · {task.owner.name} · {task.dueDate ?? "마감 없음"}</div>
                   {canWrite(me.role) ? (
                     <select className="control mutate" aria-label={`${task.title} 상태`} value={task.status} onChange={(event) => void changeStatus(task, event.target.value, online, toast, reload)}>
                       {STATUSES.map((item) => <option key={item}>{item}</option>)}
@@ -189,6 +188,7 @@ function TeamInner() {
             return next;
           })}
           onStatus={(task, status) => void changeStatus(task, status, online, toast, reload)}
+          onCadence={(task, cadence) => void changeCadence(task, cadence, online, toast, reload)}
         />
       )}
     </div>

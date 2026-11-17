@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, canWrite, formatWhen, type Task } from "@/components/api";
+import { api, CADENCES, cadenceLabel, canWrite, formatWhen, type Task } from "@/components/api";
 import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
 
@@ -21,7 +21,7 @@ export default function ProjectBoardPage() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [due, setDue] = useState("");
-  const [kind, setKind] = useState<"once" | "daily">("once");
+  const [kind, setKind] = useState<Task["workKind"]>("once");
   const [assignees, setAssignees] = useState<string[]>([]);
 
   function load() {
@@ -82,9 +82,8 @@ export default function ProjectBoardPage() {
               <input className="field" type="date" value={due} onChange={(event) => setDue(event.target.value)} />
             </label>
             <label className="stack">구분
-              <select className="control" value={kind} onChange={(event) => setKind(event.target.value as "once" | "daily")}>
-                <option value="once">1회성 업무</option>
-                <option value="daily">데일리업무</option>
+              <select className="control" value={kind} onChange={(event) => setKind(event.target.value as Task["workKind"])}>
+                {CADENCES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
             <label className="stack">담당
@@ -107,7 +106,7 @@ export default function ProjectBoardPage() {
                 <tr key={post.id} className={post.overdue ? "late" : ""}>
                   <td><Link href={post.href}>{post.title}</Link><span className="sub">{post.body ? post.body.slice(0, 80) : "본문 없음"}</span></td>
                   <td>{names(post)}</td>
-                  <td>{post.workKind === "daily" ? "데일리" : "1회성"}</td>
+                  <td>{cadenceLabel(post.workKind)}</td>
                   <td>{post.status}</td>
                   <td>{post.dueDate ?? "—"}</td>
                   <td>{formatWhen(post.createdAt)}</td>

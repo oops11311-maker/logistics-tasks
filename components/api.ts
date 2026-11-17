@@ -30,7 +30,7 @@ export type Task = {
   updatedAt: string | null;
   overdue: boolean;
   recurring: boolean;
-  workKind: "daily" | "once";
+  workKind: "once" | "daily" | "weekly" | "monthly" | "yearly";
   recurrence: null | {
     freq: string;
     interval: number;
@@ -43,6 +43,17 @@ export type Task = {
 
 export const STATUSES = ["할 일", "진행 중", "확인 요청", "보류", "완료"] as const;
 export const PRIORITIES = ["긴급", "높음", "보통", "낮음"] as const;
+export const CADENCES = [
+  ["once", "1회성"],
+  ["daily", "매일"],
+  ["weekly", "매주"],
+  ["monthly", "매월"],
+  ["yearly", "매년"],
+] as const;
+
+export function cadenceLabel(value: string): string {
+  return CADENCES.find((item) => item[0] === value)?.[1] ?? "1회성";
+}
 
 export class ApiError extends Error {
   status: number;

@@ -2,11 +2,21 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { api } from "@/components/api";
+import { api, formatWhen } from "@/components/api";
 import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
 
-type Project = { id: string; name: string; total: number; done: number; overdue: number; progress: number };
+type Project = {
+  id: string;
+  name: string;
+  total: number;
+  done: number;
+  overdue: number;
+  progress: number;
+  latestTitle: string | null;
+  latestAt: string | null;
+  latestOwner: string | null;
+};
 
 export default function ProjectsPage() {
   const { revision, me, online, toast, reload } = useApp();
@@ -47,22 +57,34 @@ export default function ProjectsPage() {
 
   return (
     <div className="list">
+      <p className="hint">프로젝트 게시판입니다. 글을 올리면 고른 담당자의 내 업무에 들어갑니다.</p>
       {manage ? (
         <form className="filters" onSubmit={(event) => void add(event)}>
-          <input className="field grow" aria-label="프로젝트 이름" placeholder="새 프로젝트" value={name} onChange={(event) => setName(event.target.value)} required />
-          <button className="btn primary mutate" disabled={!online}>추가</button>
+          <input className="field grow" aria-label="프로젝트 이름" placeholder="새 게시판" value={name} onChange={(event) => setName(event.target.value)} required />
+          <button className="btn primary mutate" disabled={!online}>게시판 추가</button>
         </form>
       ) : null}
-      {items.length === 0 ? <State kind="empty">프로젝트가 없습니다.</State> : items.map((item) => (
-        <Link key={item.id} href={`/team?categoryId=${item.id}`} className="panel">
-          <div className="spread">
-            <h2>{item.name}</h2>
-            <span>{item.total === 0 ? "0%" : `${Math.round(item.progress * 100)}%`}</span>
-          </div>
-          <div className="progress" aria-hidden="true"><span style={{ width: `${item.total === 0 ? 0 : item.progress * 100}%` }} /></div>
-          <p className="hint">전체 {item.total} · 완료 {item.done} · 지연 {item.overdue}</p>
-        </Link>
-      ))}
+      {items.length === 0 ? <State kind="empty">게시판이 없습니다.</State> : (
+        <div className="table-wrap">
+          <table className="board">
+            <thead>
+              <tr><th>게시판</th><th>글</th><th>진행</th><th>최근 글</th><th>올린 사람</th><th>시각</th></tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.id}>
+                  <td><Link href={`/projects/${item.id}`}>{item.name}</Link></td>
+                  <td>{item.total}</td>
+                  <td>완료 {item.done} · 지연 {item.overdue} · {item.total === 0 ? "0%" : `${Math.round(item.progress * 100)}%`}</td>
+                  <td>{item.latestTitle ?? "글 없음"}</td>
+                  <td>{item.latestOwner ?? "—"}</td>
+                  <td>{formatWhen(item.latestAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

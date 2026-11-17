@@ -101,7 +101,25 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
       },
     });
     assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.equal(created.data.task.workKind, "once");
     const taskId = created.data.task.id as string;
+    const posted = await call("POST", `/api/projects/${categoryId}/posts`, {
+      actor: admin,
+      body: {
+        title: "게시판에서 온 업무",
+        assigneeIds: [minaBoot.data.me.id, junoBoot.data.me.id],
+        workKind: "once",
+      },
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+    const postId = posted.data.task.id as string;
+    const minaMine = await call("GET", "/api/tasks?mine=1&kind=once&limit=100", { actor: mina });
+    const junoMine = await call("GET", "/api/tasks?mine=1&kind=once&limit=100", { actor: juno });
+    assert.equal(minaMine.data.items.some((item: { id: string }) => item.id === postId), true);
+    assert.equal(junoMine.data.items.some((item: { id: string }) => item.id === postId), true);
+    const board = await call("GET", `/api/projects/${categoryId}`, { actor: juno });
+    assert.equal(board.status, 200);
+    assert.equal(board.data.posts.some((item: { id: string }) => item.id === postId), true);
     const seen = await call("GET", `/api/tasks/${taskId}`, { actor: juno });
     assert.equal(seen.status, 200);
     assert.equal(seen.data.task.title, "공유 입고 확인");
@@ -168,6 +186,17 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
       },
     });
     assert.equal(recurring.status, 201, JSON.stringify(recurring.data));
+    assert.equal(recurring.data.task.workKind, "daily");
+    const dailyMade = await call("POST", "/api/tasks", {
+      actor: mina,
+      body: { title: "아침 점검", workKind: "daily", dueDate: "2026-11-18" },
+    });
+    assert.equal(dailyMade.status, 201);
+    assert.equal(dailyMade.data.task.workKind, "daily");
+    const dailyList = await call("GET", "/api/tasks?mine=1&kind=daily&limit=100", { actor: mina });
+    const onceList = await call("GET", "/api/tasks?mine=1&kind=once&limit=100", { actor: mina });
+    assert.equal(dailyList.data.items.some((item: { title: string }) => item.title === "아침 점검"), true);
+    assert.equal(onceList.data.items.some((item: { title: string }) => item.title === "아침 점검"), false);
 
     const now = seoulToUtc("2026-11-18", 9, 30).toISOString();
     const firstRun = await call("POST", "/api/jobs/webhook", {

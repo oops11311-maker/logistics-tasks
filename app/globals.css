@@ -58,9 +58,10 @@ button { cursor: pointer; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .spread { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
 
-.btn, .tab, select.control, .icon-btn {
+.btn, .tab, select.control, select[multiple].control, .icon-btn {
   min-height: 36px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); padding: 0 12px;
 }
+select[multiple].control { min-height: 96px; height: auto; padding: 6px; }
 .btn.primary { background: var(--nav); color: #f6f1e8; border-color: var(--nav); }
 .btn.danger { color: var(--danger); }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
@@ -130,6 +131,15 @@ label.stack { display: flex; flex-direction: column; gap: 4px; font-size: 13px; 
 .cal .day b { display: block; margin-bottom: 4px; }
 .cal .day a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+.boards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+.board { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.board th, .board td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.board th { color: var(--muted); font-size: 12px; font-weight: 650; background: var(--cream); }
+.board tr:last-child td { border-bottom: 0; }
+.board tr.active td { background: #f3f7f4; }
+.board a { font-weight: 650; }
+.board .sub { display: block; }
+.article { display: flex; flex-direction: column; gap: 8px; }
 .progress { height: 8px; background: #e7e0d4; border-radius: 99px; overflow: hidden; }
 .progress span { display: block; height: 100%; background: var(--ok); }
 .note-pop { position: absolute; right: 22px; top: 58px; width: min(360px, calc(100vw - 32px)); z-index: 8; }
@@ -147,7 +157,12 @@ pre.copy { white-space: pre-wrap; font-family: inherit; font-size: 13px; backgro
   .top { padding: 12px 14px; }
   .content { padding: 14px 14px 96px; }
   .banner { margin: 10px 14px 0; }
-  .cards-4, .cards-2 { grid-template-columns: 1fr; }
+  .cards-4, .cards-2, .boards { grid-template-columns: 1fr; }
+  .board { display: block; }
+  .board thead { display: none; }
+  .board tr, .board td { display: block; width: auto; }
+  .board td { border-bottom: 0; padding: 4px 14px; }
+  .board tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
   .only-pc { display: none !important; }
   .cards { display: grid; gap: 10px; }
   .mcard {

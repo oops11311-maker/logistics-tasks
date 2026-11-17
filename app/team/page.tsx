@@ -22,7 +22,7 @@ function TeamInner() {
 
   const query = useMemo(() => {
     const next = new URLSearchParams();
-    for (const key of ["q", "assigneeId", "categoryId", "status", "priority", "due"]) {
+    for (const key of ["q", "assigneeId", "categoryId", "status", "priority", "due", "kind"]) {
       const value = params.get(key);
       if (value) next.set(key, value);
     }
@@ -107,6 +107,11 @@ function TeamInner() {
           <option value="">우선순위 전체</option>
           {PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}
         </select>
+        <select className="control" aria-label="업무 구분" value={params.get("kind") ?? ""} onChange={(event) => setParam("kind", event.target.value)}>
+          <option value="">데일리·1회성</option>
+          <option value="daily">데일리업무</option>
+          <option value="once">1회성 업무</option>
+        </select>
         <select className="control" aria-label="마감" value={params.get("due") ?? ""} onChange={(event) => setParam("due", event.target.value)}>
           <option value="">마감 전체</option>
           <option value="today">오늘</option>
@@ -140,7 +145,7 @@ function TeamInner() {
               {items.filter((task) => task.status === status).map((task) => (
                 <article key={task.id} className="kcard">
                   <Link href={task.href}><strong>{task.title}</strong></Link>
-                  <div className="sub">{task.owner.name} · {task.dueDate ?? "마감 없음"}</div>
+                  <div className="sub">{task.workKind === "daily" ? "데일리" : "1회성"} · {task.owner.name} · {task.dueDate ?? "마감 없음"}</div>
                   {canWrite(me.role) ? (
                     <select className="control mutate" aria-label={`${task.title} 상태`} value={task.status} onChange={(event) => void changeStatus(task, event.target.value, online, toast, reload)}>
                       {STATUSES.map((item) => <option key={item}>{item}</option>)}

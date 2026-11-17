@@ -73,6 +73,7 @@ export default function TaskPage() {
           links: task.links,
           holdReason: task.holdReason,
           delayReason: task.delayReason,
+          workKind: task.workKind,
         }),
       });
       setDetail(saved);
@@ -140,6 +141,12 @@ export default function TaskPage() {
           <label className="stack">우선순위
             <select className="control" value={task.priority} disabled={!editable || !online} onChange={(event) => update("priority", event.target.value)}>
               {PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}
+            </select>
+          </label>
+          <label className="stack">구분
+            <select className="control" value={task.workKind} disabled={!editable || !online} onChange={(event) => update("workKind", event.target.value === "daily" ? "daily" : "once")}>
+              <option value="daily">데일리업무</option>
+              <option value="once">1회성 업무</option>
             </select>
           </label>
           <label className="stack">시작

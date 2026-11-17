@@ -52,6 +52,7 @@ type TaskRow = {
   recurrence_dom: number | null;
   recurrence_until: unknown;
   next_run_on: unknown;
+  work_kind?: string | null;
   category_name?: string | null;
 };
 
@@ -87,6 +88,7 @@ export type TaskDto = {
   updatedAt: string | null;
   overdue: boolean;
   recurring: boolean;
+  workKind: "daily" | "once";
   templateId: string | null;
   recurrence: {
     freq: string;
@@ -219,6 +221,7 @@ export function toDto(
     updatedAt: asIso(row.updated_at),
     overdue: Boolean(dueAt && !deletedAt && status !== "완료" && new Date(dueAt).getTime() < now.getTime()),
     recurring: Boolean(row.template_id),
+    workKind: row.work_kind === "daily" ? "daily" : "once",
     templateId: row.template_id,
     recurrence,
   };
@@ -308,6 +311,8 @@ export type TaskFilters = {
   mine?: boolean;
   open?: boolean;
   trash?: boolean;
+  kind?: "daily" | "once";
+  sort?: "new";
   limit: number;
   offset: number;
   categoryScope?: string[] | null;
@@ -382,6 +387,8 @@ export async function listTasks(actor: Actor, filters: TaskFilters, now = new Da
   }
   if (filters.dueFrom) add("to_char(t.due_date, 'YYYY-MM-DD') >= $?", filters.dueFrom);
   if (filters.dueTo) add("to_char(t.due_date, 'YYYY-MM-DD') <= $?", filters.dueTo);
+  if (filters.kind === "daily") where.push("t.work_kind = 'daily'");
+  if (filters.kind === "once") where.push("t.work_kind = 'once'");
   const whereSql = where.join(" and ");
   const totalRows = await sql<{ n: number }>(
     `select count(*)::int as n from tasks t where ${whereSql}`,
@@ -394,8 +401,9 @@ export async function listTasks(actor: Actor, filters: TaskFilters, now = new Da
      from tasks t
      left join categories c on c.id = t.category_id
      where ${whereSql}
-     order by case t.priority when '긴급' then 0 when '높음' then 1 when '보통' then 2 else 3 end,
-              t.due_at nulls last, t.updated_at desc
+     order by ${filters.sort === "new"
+       ? "t.created_at desc"
+       : "case t.priority when '긴급' then 0 when '높음' then 1 when '보통' then 2 else 3 end, t.due_at nulls last, t.updated_at desc"}
      limit $${listParams.length - 1} offset $${listParams.length}`,
     listParams,
   );
@@ -598,6 +606,9 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
   }
   const categoryId = typeof body.categoryId === "string" && body.categoryId ? body.categoryId : null;
   if (categoryId && !isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 확인하세요.");
+  const workKind = body.workKind === "daily" || body.workKind === "once"
+    ? body.workKind
+    : "once";
   let recurrence: { freq: string; interval: number; businessDaysOnly: boolean; until: string | null } | null = null;
   if (body.recurrence && typeof body.recurrence === "object") {
     const record = body.recurrence as Record<string, unknown>;
@@ -652,16 +663,16 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
         templateId: null,
         occurrenceKey: null,
         isTemplate: false,
+        workKind: recurrenceKind(workKind, null),
       });
       await replaceCollaborators(query, createdId, collaboratorIds.filter((item) => item !== ownerId));
       await writeEvent(query, actor.stage, createdId, actor, "create", "status", null, status);
-      if (ownerId !== actor.memberId) {
-        await notify(query, actor.stage, ownerId, createdId, "assign", "업무가 배정되었습니다", title, `assign:${createdId}:${ownerId}:1`);
-      }
+      await notifyAssignees(query, actor, createdId, ownerId, collaboratorIds, title, "1");
       return createdId;
     }
     if (!dueDate) throw new HttpError(400, "invalid", "반복 업무에는 마감일이 필요합니다.");
     const templateId = id();
+    const kind = recurrenceKind(workKind, recurrence);
     const following = nextDate(
       recurrence.freq,
       recurrence.interval,
@@ -676,10 +687,10 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
       `insert into tasks (
          id, stage, title, body, category_id, owner_id, creator_id, start_date, due_date, due_time, due_at,
          priority, status, checklist, tags, links, hold_reason, delay_reason, is_template,
-         recurrence_freq, recurrence_interval, recurrence_business_days, recurrence_dom, recurrence_until, next_run_on
+         recurrence_freq, recurrence_interval, recurrence_business_days, recurrence_dom, recurrence_until, next_run_on, work_kind
        ) values (
          $1,$2,$3,$4,$5,$6,$7,$8::date,$9::date,$10,$11,$12,'할 일',$13::jsonb,$14::jsonb,$15::jsonb,$16,$17,true,
-         $18,$19,$20,$21,$22::date,$23::date
+         $18,$19,$20,$21,$22::date,$23::date,$24
        )`,
       [
         templateId,
@@ -705,6 +716,7 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
         Number(dueDate.slice(8, 10)),
         recurrence.until,
         following,
+        kind,
       ],
     );
     await replaceCollaborators(query, templateId, collaboratorIds.filter((item) => item !== ownerId));
@@ -731,12 +743,30 @@ export async function createTask(actor: Actor, body: Record<string, unknown>, no
       templateId,
       occurrenceKey: dueDate,
       isTemplate: false,
+      workKind: kind,
     });
     await replaceCollaborators(query, createdId, collaboratorIds.filter((item) => item !== ownerId));
     await writeEvent(query, actor.stage, createdId, actor, "create", "status", null, "할 일");
+    await notifyAssignees(query, actor, createdId, ownerId, collaboratorIds, title, "1");
     return createdId;
   });
   return getTask(actor, taskId);
+}
+
+export async function createProjectPost(actor: Actor, categoryId: string, body: Record<string, unknown>, now = new Date()) {
+  if (!isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 확인하세요.");
+  const raw = Array.isArray(body.assigneeIds) ? body.assigneeIds.map(String) : [];
+  const assigneeIds = [...new Set(raw.filter(Boolean))];
+  if (assigneeIds.length === 0) assigneeIds.push(actor.memberId);
+  if (assigneeIds.length > 20) throw new HttpError(400, "invalid", "담당자는 20명까지입니다.");
+  if (assigneeIds.some((item) => !isId(item))) throw new HttpError(400, "invalid", "담당자를 확인하세요.");
+  return createTask(actor, {
+    ...body,
+    categoryId,
+    ownerId: assigneeIds[0],
+    collaboratorIds: assigneeIds.slice(1),
+    assigneeIds: undefined,
+  }, now);
 }
 
 type InsertInput = {
@@ -762,17 +792,38 @@ type InsertInput = {
   templateId: string | null;
   occurrenceKey: string | null;
   isTemplate: boolean;
+  workKind: "daily" | "once";
 };
+
+function recurrenceKind(chosen: "daily" | "once", recurrence: { freq: string } | null): "daily" | "once" {
+  if (chosen === "daily" || recurrence?.freq === "daily") return "daily";
+  return "once";
+}
+
+async function notifyAssignees(
+  query: QueryFn,
+  actor: Actor,
+  taskId: string,
+  ownerId: string,
+  collaboratorIds: string[],
+  title: string,
+  version: string,
+) {
+  const people = [...new Set([ownerId, ...collaboratorIds])].filter((memberId) => memberId !== actor.memberId);
+  for (const memberId of people) {
+    await notify(query, actor.stage, memberId, taskId, "assign", "업무가 배정되었습니다", title, `assign:${taskId}:${memberId}:${version}`);
+  }
+}
 
 async function insertTask(query: QueryFn, input: InsertInput): Promise<boolean> {
   const rows = await query<{ id: string }>(
     `insert into tasks (
        id, stage, title, body, category_id, owner_id, creator_id, start_date, due_date, due_time, due_at,
        priority, status, checklist, tags, links, hold_reason, delay_reason, completed_at,
-       is_template, template_id, occurrence_key
+       is_template, template_id, occurrence_key, work_kind
      ) values (
        $1,$2,$3,$4,$5,$6,$7,$8::date,$9::date,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16::jsonb,$17,$18,$19,
-       $20,$21,$22
+       $20,$21,$22,$23
      )
      on conflict (stage, template_id, occurrence_key) where template_id is not null do nothing
      returning id`,
@@ -799,6 +850,7 @@ async function insertTask(query: QueryFn, input: InsertInput): Promise<boolean> 
       input.isTemplate,
       input.templateId,
       input.occurrenceKey,
+      input.workKind,
     ],
   );
   return Boolean(rows[0]);
@@ -849,6 +901,7 @@ export async function spawnOccurrence(
     templateId: template.id,
     occurrenceKey: dueDate,
     isTemplate: false,
+    workKind: template.work_kind === "daily" || template.recurrence_freq === "daily" ? "daily" : "once",
   });
   if (!created) return null;
   const collabs = await query<{ member_id: string }>(
@@ -940,6 +993,10 @@ export async function updateTask(actor: Actor, taskId: string, body: Record<stri
     const tags = body.tags === undefined ? asJson<string[]>(row.tags, []) : parseTags(body.tags);
     const links = body.links === undefined ? asJson<LinkItem[]>(row.links, []) : parseLinks(body.links);
     const categoryId = body.categoryId === undefined ? row.category_id : (body.categoryId ? String(body.categoryId) : null);
+    const workKind = body.workKind === undefined
+      ? (row.work_kind === "daily" ? "daily" : "once")
+      : body.workKind === "daily" ? "daily" : body.workKind === "once" ? "once" : null;
+    if (!workKind) throw new HttpError(400, "invalid", "업무 구분이 올바르지 않습니다.");
     if (categoryId && !isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 확인하세요.");
     if (categoryId && categoryId !== row.category_id) {
       const categories = await query<{ id: string }>(
@@ -956,7 +1013,7 @@ export async function updateTask(actor: Actor, taskId: string, body: Record<stri
       `update tasks set
          title = $4, body = $5, category_id = $6, owner_id = $7, start_date = $8::date, due_date = $9::date,
          due_time = $10, due_at = $11, priority = $12, status = $13, checklist = $14::jsonb, tags = $15::jsonb,
-         links = $16::jsonb, hold_reason = $17, delay_reason = $18, completed_at = $19,
+         links = $16::jsonb, hold_reason = $17, delay_reason = $18, completed_at = $19, work_kind = $20,
          version = version + 1, updated_at = now()
        where id = $1 and stage = $2 and version = $3 and deleted_at is null
        returning *`,
@@ -980,6 +1037,7 @@ export async function updateTask(actor: Actor, taskId: string, body: Record<stri
         holdReason,
         delayReason,
         completedAt,
+        workKind,
       ],
     );
     if (!updated[0]) await conflict(query, actor.stage, taskId);

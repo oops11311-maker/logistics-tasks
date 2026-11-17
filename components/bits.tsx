@@ -40,7 +40,7 @@ export function TaskTables({
             {items.map((task) => (
               <tr key={task.id} className={task.overdue ? "late" : ""}>
                 {onSelect ? <td><input type="checkbox" checked={selected?.has(task.id) ?? false} onChange={(event) => onSelect(task.id, event.target.checked)} aria-label={`${task.title} 선택`} /></td> : null}
-                <td><Link href={task.href}>{task.title}</Link></td>
+                <td><Link href={task.href}>{task.title}</Link> <span className="chip">{task.workKind === "daily" ? "데일리" : "1회성"}</span></td>
                 <td>{task.categoryName ?? "—"}</td>
                 <td>{task.owner.name}</td>
                 <td>{onStatus && writable ? <StatusSelect task={task} onStatus={onStatus} /> : <span className={`chip ${statusClass(task.status)}`}>{task.status}</span>}</td>
@@ -56,7 +56,7 @@ export function TaskTables({
           <article key={task.id} className={task.overdue ? "mcard late" : "mcard"}>
             {onSelect ? <label className="check"><input type="checkbox" checked={selected?.has(task.id) ?? false} onChange={(event) => onSelect(task.id, event.target.checked)} />선택</label> : null}
             <Link href={task.href}><strong>{task.title}</strong></Link>
-            <div className="sub">{task.categoryName ?? "프로젝트 없음"} · {task.owner.name} · {task.dueDate ?? "마감 없음"}</div>
+            <div className="sub">{task.workKind === "daily" ? "데일리" : "1회성"} · {task.categoryName ?? "프로젝트 없음"} · {task.owner.name} · {task.dueDate ?? "마감 없음"}</div>
             <div className="row">
               <span className={`chip p-${task.priority}`}>{task.priority}</span>
               <span className="chip">{task.status}</span>

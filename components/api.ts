@@ -30,6 +30,7 @@ export type Task = {
   updatedAt: string | null;
   overdue: boolean;
   recurring: boolean;
+  workKind: "daily" | "once";
   recurrence: null | {
     freq: string;
     interval: number;

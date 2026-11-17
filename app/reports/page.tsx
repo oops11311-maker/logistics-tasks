@@ -18,11 +18,14 @@ type Report = {
   byAssignee: { id: string; name: string; open: number; overdue: number; doneThisWeek: number }[];
 };
 
+const ORDER = ["done", "progress", "overdue", "next", "people"] as const;
+
 export default function ReportsPage() {
   const { revision, toast } = useApp();
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState<(typeof ORDER)[number]>("done");
 
   function load() {
     setLoading(true);
@@ -43,7 +46,7 @@ export default function ReportsPage() {
       await navigator.clipboard.writeText(report.text);
       toast("보고서를 복사했습니다.");
     } catch {
-      toast("복사하지 못했습니다. 아래 글을 선택하세요.");
+      toast("복사하지 못했습니다. 글 안의 목록을 선택하세요.");
     }
   }
 
@@ -62,43 +65,80 @@ export default function ReportsPage() {
   if (error) return <State kind="error" onRetry={load}>{error}</State>;
   if (!report) return <State kind="empty">보고서가 없습니다.</State>;
 
+  const posts = [
+    { id: "done" as const, title: "이번 주 완료", count: report.doneThisWeek.length, hint: "이번 주 서울 주에 완료된 업무" },
+    { id: "progress" as const, title: "진행 중", count: report.inProgress.length, hint: "아직 끝나지 않은 진행 중 업무" },
+    { id: "overdue" as const, title: "마감 지남", count: report.overdue.length, hint: "지연 사유가 없으면 사유 미입력" },
+    { id: "next" as const, title: "다음 주", count: report.nextWeekTasks.length, hint: "다음 주 마감인 업무" },
+    { id: "people" as const, title: "담당자별", count: report.byAssignee.length, hint: "담당자별 진행, 지연, 이번 주 완료" },
+  ];
+  const current = posts.find((post) => post.id === open) ?? posts[0];
+
   return (
     <div className="list">
       <div className="row">
         <button className="btn" onClick={() => void copy()}>보고서 복사</button>
         <button className="btn" onClick={download}>CSV 받기</button>
-        <span className="hint">서울 {report.week.start}–{report.week.end}. 숫자는 저장된 업무만 셉니다.</span>
+        <span className="hint">서울 {report.week.start}–{report.week.end}. 글은 저장된 업무만 모읍니다.</span>
       </div>
-      <Section title="이번 주 완료" rows={report.doneThisWeek} />
-      <Section title="진행 중" rows={report.inProgress} />
-      <Section title="마감 지남" rows={report.overdue} delay />
-      <Section title="다음 주" rows={report.nextWeekTasks} />
-      <section className="panel">
-        <h2>담당자별</h2>
-        {report.byAssignee.map((row) => (
+      <div className="table-wrap">
+        <table className="board">
+          <thead>
+            <tr><th>글</th><th>건수</th><th>내용</th></tr>
+          </thead>
+          <tbody>
+            {posts.map((post) => (
+              <tr key={post.id} className={post.id === open ? "active" : ""}>
+                <td><button className="btn" onClick={() => setOpen(post.id)}>{post.title}</button></td>
+                <td>{post.count}</td>
+                <td>{post.hint}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <article className="panel article">
+        <h2>{current.title} {current.count}건</h2>
+        <p className="hint">{current.hint}</p>
+        {open === "people" ? report.byAssignee.map((row) => (
           <Link key={row.id} href={`/team?assigneeId=${row.id}`} className="item">
-            <span>{row.name}</span>
+            <span className="title">{row.name}</span>
             <span className="sub">진행 {row.open} · 지연 {row.overdue} · 이번 주 완료 {row.doneThisWeek}</span>
           </Link>
-        ))}
-      </section>
-      <pre className="copy">{report.text}</pre>
+        )) : <Lines rows={rowsOf(report, open)} delay={open === "overdue"} />}
+      </article>
     </div>
   );
 }
 
-function Section({ title, rows, delay = false }: { title: string; rows: Line[]; delay?: boolean }) {
+function rowsOf(report: Report, id: (typeof ORDER)[number]): Line[] {
+  if (id === "done") return report.doneThisWeek;
+  if (id === "progress") return report.inProgress;
+  if (id === "overdue") return report.overdue;
+  if (id === "next") return report.nextWeekTasks;
+  return [];
+}
+
+function Lines({ rows, delay }: { rows: Line[]; delay: boolean }) {
+  if (rows.length === 0) return <p className="state">없음</p>;
   return (
-    <section className="panel">
-      <h2>{title} {rows.length}건</h2>
-      {rows.length === 0 ? <p className="state">없음</p> : rows.map((row) => (
-        <Link key={row.id} href={row.href} className="item">
-          <span>
-            <span className="title">{row.title}</span>
-            <span className="sub">{row.ownerName} · {row.status}{delay ? ` · ${row.delayReason?.trim() ? row.delayReason : "사유 미입력"}` : ""}</span>
-          </span>
-        </Link>
-      ))}
-    </section>
+    <div className="table-wrap">
+      <table className="board">
+        <thead>
+          <tr><th>업무</th><th>담당</th><th>상태</th><th>마감</th>{delay ? <th>지연 사유</th> : null}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}>
+              <td><Link href={row.href}>{row.title}</Link></td>
+              <td>{row.ownerName}</td>
+              <td>{row.status}</td>
+              <td>{row.dueDate ?? "—"}</td>
+              {delay ? <td>{row.delayReason?.trim() ? row.delayReason : "사유 미입력"}</td> : null}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

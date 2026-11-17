@@ -37,6 +37,7 @@ import {
   addComment,
   bulkUpdate,
   changeLifecycle,
+  createProjectPost,
   createTask,
   dashboard,
   getTask,
@@ -126,19 +127,39 @@ function filtersFrom(url: URL): TaskFilters {
     mine: url.searchParams.get("mine") === "1",
     open: url.searchParams.get("open") === "1",
     trash: url.searchParams.get("trash") === "1",
+    kind: url.searchParams.get("kind") === "daily" ? "daily" : url.searchParams.get("kind") === "once" ? "once" : undefined,
+    sort: url.searchParams.get("sort") === "new" ? "new" : undefined,
     limit: queryNumber(url.searchParams.get("limit"), 50, 100),
     offset: queryNumber(url.searchParams.get("offset"), 0, 5000),
   };
 }
 
 async function projectStats(actor: Actor, now: Date) {
-  const rows = await sql<{ id: string; name: string; total: number; done: number; overdue: number }>(
+  const rows = await sql<{
+    id: string;
+    name: string;
+    total: number;
+    done: number;
+    overdue: number;
+    latest_title: string | null;
+    latest_at: unknown;
+    latest_owner: string | null;
+  }>(
     `select c.id, c.name,
         count(t.id) filter (where t.deleted_at is null and t.is_template = false)::int as total,
         count(t.id) filter (where t.status = '완료' and t.deleted_at is null and t.is_template = false)::int as done,
         count(t.id) filter (
           where t.status <> '완료' and t.deleted_at is null and t.is_template = false and t.due_at < $2::timestamptz
-        )::int as overdue
+        )::int as overdue,
+        (select t2.title from tasks t2
+          where t2.category_id = c.id and t2.stage = c.stage and t2.deleted_at is null and t2.is_template = false
+          order by t2.created_at desc limit 1) as latest_title,
+        (select t2.created_at from tasks t2
+          where t2.category_id = c.id and t2.stage = c.stage and t2.deleted_at is null and t2.is_template = false
+          order by t2.created_at desc limit 1) as latest_at,
+        (select m.name from tasks t2 join members m on m.id = t2.creator_id
+          where t2.category_id = c.id and t2.stage = c.stage and t2.deleted_at is null and t2.is_template = false
+          order by t2.created_at desc limit 1) as latest_owner
      from categories c
      left join tasks t on t.category_id = c.id and t.stage = c.stage
      where c.stage = $1 and c.archived = false
@@ -156,6 +177,9 @@ async function projectStats(actor: Actor, now: Date) {
       done,
       overdue: Number(row.overdue),
       progress: total === 0 ? 0 : done / total,
+      latestTitle: row.latest_title,
+      latestAt: asIso(row.latest_at),
+      latestOwner: row.latest_owner,
     };
   });
 }
@@ -396,7 +420,23 @@ async function humanRoute(request: Request, method: string, path: string[], url:
   if (path[0] === "sync" && method === "GET") {
     return json({ cursor: await syncCursor(actor) });
   }
-  if (path[0] === "projects" && method === "GET") return json({ items: await projectStats(actor, now) });
+  if (path[0] === "projects" && path.length === 1 && method === "GET") return json({ items: await projectStats(actor, now) });
+  if (path[0] === "projects" && path[1] && path[2] === "posts" && method === "POST") {
+    return json(await createProjectPost(actor, path[1], await readJson(request), now), 201);
+  }
+  if (path[0] === "projects" && path[1] && method === "GET") {
+    if (!isId(path[1])) return json({ error: "not_found", message: "프로젝트를 찾지 못했습니다." }, 404);
+    const boards = await projectStats(actor, now);
+    const project = boards.find((item) => item.id === path[1]);
+    if (!project) return json({ error: "not_found", message: "프로젝트를 찾지 못했습니다." }, 404);
+    const posts = await listTasks(actor, {
+      categoryId: path[1],
+      limit: 100,
+      offset: 0,
+      sort: "new",
+    }, now);
+    return json({ project, posts: posts.items });
+  }
   if (path[0] === "reports" && method === "GET") {
     if (actor.role === "bot") throw new HttpError(403, "forbidden", "보고서를 볼 권한이 없습니다.");
     const report = await buildReport(actor, now);

@@ -12,15 +12,14 @@ import {
   loadSettings,
   matchesSecret,
   requestStage,
-  resolveHuman,
   saveSettings,
   secretConfigured,
-  testAuthAllowed,
   updateCategory,
   updateMember,
   type Actor,
   type Stage,
 } from "./access";
+import { assertCsrf, changeOwnPassword, createAccount, ensureInitialAdminPassword, login, logout, resetAccountPassword, resolveSession } from "./auth";
 import { sql } from "./db";
 import { asIso } from "./format";
 import {
@@ -58,7 +57,8 @@ const DUE = new Set(["today", "week", "next", "overdue", "soon", "stale"]);
 const BOT_BLOCKED = ["status", "ownerId", "assigneeId", "dueDate", "dueTime", "delete", "deleted"];
 
 function clock(request: Request): Date {
-  if (testAuthAllowed(request)) {
+  if (process.env.NODE_ENV === "production" || process.env.CURSOR_APP_ID || process.env.VERCEL) return new Date();
+  if (process.env.LOGISTICS_TEST_AUTH === "1") {
     const raw = request.headers.get("x-logistics-test-now");
     if (raw) {
       const date = new Date(raw);
@@ -68,9 +68,12 @@ function clock(request: Request): Date {
   return new Date();
 }
 
-async function human(request: Request, mutate: boolean): Promise<Actor> {
-  if (mutate) assertSameOrigin(request);
-  const actor = await resolveHuman(request);
+async function human(request: Request, mutate: boolean): Promise<Awaited<ReturnType<typeof resolveSession>>> {
+  const actor = await resolveSession(request);
+  if (mutate) {
+    assertSameOrigin(request);
+    assertCsrf(request, actor);
+  }
   const allowed = await rateLimit(`human:${actor.stage}:${actor.memberId}`, 800);
   if (!allowed) throw new HttpError(429, "rate", "요청이 너무 많습니다. 잠시 후 다시 시도하세요.");
   return actor;
@@ -261,12 +264,18 @@ async function adminState(actor: Actor, now: Date) {
 
 export async function handle(request: Request): Promise<Response> {
   try {
+    await ensureInitialAdminPassword();
     const url = new URL(request.url);
     const parts = url.pathname.split("/").filter(Boolean);
     if (parts[0] !== "api") return json({ error: "not_found", message: "없는 주소입니다." }, 404);
     const method = request.method.toUpperCase();
     const path = parts.slice(1);
     const now = clock(request);
+    if (path[0] === "health" && method === "GET") return json({ ok: true });
+    if (path[0] === "auth" && path[1] === "login" && method === "POST") {
+      assertSameOrigin(request);
+      return await login(request, await readJson(request));
+    }
     if (path[0] === "bot") return await botRoute(request, method, path.slice(1), url, now);
     if (path[0] === "jobs" && path[1] === "webhook") return await webhook(request, now);
     return await humanRoute(request, method, path, url, now);
@@ -410,6 +419,11 @@ async function humanRoute(request: Request, method: string, path: string[], url:
   }
   const mutate = method !== "GET" && method !== "HEAD";
   const actor = await human(request, mutate);
+  if (path[0] === "auth" && path[1] === "logout" && method === "POST") return logout(actor, request);
+  if (path[0] === "auth" && path[1] === "password" && method === "POST") return changeOwnPassword(actor, await readJson(request));
+  if (actor.mustChangePassword) {
+    throw new HttpError(403, "password_change_required", "비밀번호를 먼저 바꾸세요.", { csrfToken: actor.csrfToken });
+  }
   if (path[0] === "bootstrap" && method === "GET") {
     const [categories, people, notes] = await Promise.all([
       listCategories(actor.stage, false),
@@ -418,6 +432,7 @@ async function humanRoute(request: Request, method: string, path: string[], url:
     ]);
     return json({
       me: { id: actor.memberId, name: actor.name, email: actor.email, role: actor.role },
+      csrfToken: actor.csrfToken,
       categories,
       members: people.filter((person) => person.active),
       notifications: notes,
@@ -513,6 +528,11 @@ async function humanRoute(request: Request, method: string, path: string[], url:
 
 async function adminRoute(actor: Actor, method: string, path: string[], request: Request, now: Date): Promise<Response> {
   if (path[0] === "state" && method === "GET") return json(await adminState(actor, now));
+  if (path[0] === "accounts" && path[1] && path[2] === "password" && method === "POST") {
+    await resetAccountPassword(actor, path[1], await readJson(request));
+    return json({ ok: true });
+  }
+  if (path[0] === "accounts" && path.length === 1 && method === "POST") return json(await createAccount(actor, await readJson(request)), 201);
   if (path[0] === "invites" && method === "POST") return json(await createInvite(actor, await readJson(request)), 201);
   if (path[0] === "members" && path[1] && method === "PATCH") {
     await updateMember(actor, path[1], await readJson(request));

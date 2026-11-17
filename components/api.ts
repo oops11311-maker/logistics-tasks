@@ -66,11 +66,19 @@ export class ApiError extends Error {
   }
 }
 
+let csrfToken = "";
+
+export function setCsrf(token: string): void {
+  csrfToken = token;
+}
+
 export async function api<T>(path: string, init: RequestInit & { mutate?: boolean } = {}): Promise<T> {
   if (init.mutate && typeof navigator !== "undefined" && !navigator.onLine) {
     throw new ApiError(0, "오프라인 상태에서는 편집할 수 없습니다.", null);
   }
   const headers = new Headers(init.headers);
+  const method = (init.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && csrfToken) headers.set("x-csrf-token", csrfToken);
   if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
   let response: Response;
   try {

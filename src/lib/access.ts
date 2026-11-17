@@ -1,5 +1,4 @@
 import { timingSafeEqual } from "node:crypto";
-import { getIdentity } from "../../cursor/identity.js";
 import { sql, withTransaction, type QueryFn } from "./db";
 import { asBool, asDate, asJson, id } from "./format";
 import { HttpError, isId, isUniqueViolation } from "./http";
@@ -27,6 +26,7 @@ type MemberRow = {
 };
 
 const HUMAN_ROLES = new Set(["admin", "manager", "member", "viewer"]);
+export const FIRST_ADMIN_EMAIL = "oops11311@gmail.com";
 
 export type BotSettings = {
   summaryTime: string;
@@ -73,17 +73,6 @@ const DEFAULT_NOTIFICATIONS: NotificationSettings = {
   mentions: true,
 };
 
-export function testAuthAllowed(request: Request): boolean {
-  if (process.env.LOGISTICS_TEST_AUTH !== "1") return false;
-  if (process.env.CURSOR_APP_ID || process.env.VERCEL) return false;
-  try {
-    const host = new URL(request.url).hostname;
-    return host === "localhost" || host === "127.0.0.1";
-  } catch {
-    return false;
-  }
-}
-
 export function hasAppToken(request: Request): boolean {
   const value = request.headers.get("x-cursor-app-token");
   return value != null && value.trim() !== "";
@@ -107,51 +96,8 @@ function stageFrom(identityStage: unknown): Stage {
   return "production";
 }
 
-type LooseIdentity = {
-  verified: boolean;
-  reason?: string;
-  sub?: string;
-  email?: string;
-  name?: string;
-  kind?: string;
-  stage?: string;
-};
-
-async function viewer(request: Request): Promise<LooseIdentity> {
-  if (testAuthAllowed(request)) {
-    const raw = request.headers.get("x-logistics-test-actor");
-    if (raw) {
-      try {
-        const parsed = JSON.parse(decodeURIComponent(raw)) as {
-          sub?: string;
-          email?: string;
-          name?: string;
-          kind?: string;
-        };
-        if (!parsed.sub || !/^[A-Za-z0-9:_-]{1,80}$/.test(parsed.sub)) {
-          throw new HttpError(401, "unauthorized", "테스트 신원 형식이 올바르지 않습니다.");
-        }
-        return {
-          verified: true,
-          sub: parsed.sub,
-          email: parsed.email ?? "",
-          name: parsed.name ?? "",
-          kind: parsed.kind === "key" ? "key" : "person",
-          stage: "production",
-        };
-      } catch (error) {
-        if (error instanceof HttpError) throw error;
-        throw new HttpError(401, "unauthorized", "로그인이 필요합니다.");
-      }
-    }
-  }
-  return (await getIdentity(request)) as LooseIdentity;
-}
-
-export async function requestStage(request: Request): Promise<Stage> {
-  const identity = await viewer(request);
-  if (!identity.verified) return stageFrom(undefined);
-  return stageFrom(identity.stage);
+export async function requestStage(_request: Request): Promise<Stage> {
+  return stageFrom(undefined);
 }
 
 function toActor(row: MemberRow, kind: "human" | "bot"): Actor {
@@ -174,132 +120,6 @@ export async function botActor(stage: Stage): Promise<Actor> {
   const row = rows[0];
   if (!row) throw new HttpError(500, "bot_missing", "봇 계정을 찾지 못했습니다.");
   return toActor(row, "bot");
-}
-
-export async function resolveHuman(request: Request): Promise<Actor> {
-  if (hasAppToken(request)) {
-    throw new HttpError(403, "bot_forbidden", "앱 토큰으로는 사람 권한을 쓸 수 없습니다.");
-  }
-  const identity = await viewer(request);
-  if (!identity.verified || !identity.sub) {
-    throw new HttpError(401, "unauthorized", "로그인이 필요합니다.");
-  }
-  if (identity.kind !== "person" && identity.kind !== "key") {
-    throw new HttpError(401, "unauthorized", "로그인이 필요합니다.");
-  }
-  const stage = stageFrom(identity.stage);
-  const existing = await sql<MemberRow>(
-    `select id, stage, subject, email, email_norm, name, role, active
-     from members where stage = $1 and subject = $2`,
-    [stage, identity.sub],
-  );
-  if (existing[0]) {
-    if (!existing[0].active) {
-      throw new HttpError(403, "inactive", "비활성화된 계정입니다. 관리자에게 문의하세요.");
-    }
-    if (identity.kind !== "person") {
-      throw new HttpError(403, "bot_forbidden", "자동화 키에는 사람 권한이 없습니다. 봇 API는 별도의 토큰으로만 동작합니다.");
-    }
-    const name = identity.name?.trim() || existing[0].name;
-    const email = identity.email?.trim() || existing[0].email;
-    if (name !== existing[0].name || email !== existing[0].email) {
-      await sql(
-        `update members set name = $3, email = $4, email_norm = $5, updated_at = now()
-         where id = $1 and stage = $2`,
-        [existing[0].id, stage, name, email, email.toLowerCase()],
-      );
-      existing[0].name = name;
-      existing[0].email = email;
-    }
-    return toActor(existing[0], "human");
-  }
-  if (identity.kind !== "person") {
-    throw new HttpError(403, "bot_forbidden", "자동화 키에는 사람 권한이 없습니다. 봇 API는 별도의 토큰으로만 동작합니다.");
-  }
-  const created = await withTransaction((query) => provision(query, stage, identity));
-  if (!created) {
-    throw new HttpError(403, "forbidden", "초대된 멤버만 업무를 볼 수 있습니다.");
-  }
-  return toActor(created, "human");
-}
-
-async function provision(
-  query: QueryFn,
-  stage: Stage,
-  identity: LooseIdentity,
-): Promise<MemberRow | null> {
-  await query(`select pg_advisory_xact_lock($1)`, [stage === "preview" ? 727274112 : 727274111]);
-  const again = await query<MemberRow>(
-    `select id, stage, subject, email, email_norm, name, role, active
-     from members where stage = $1 and subject = $2`,
-    [stage, identity.sub],
-  );
-  if (again[0]) return again[0].active ? again[0] : null;
-  const email = identity.email?.trim() ?? "";
-  const emailNorm = email.toLowerCase();
-  const name = identity.name?.trim() || email || "이름 없음";
-  const admins = await query<{ id: string }>(
-    `select id from members where stage = $1 and role = 'admin' and active = true`,
-    [stage],
-  );
-  if (admins.length === 0) {
-    if (emailNorm !== "oops11311@gmail.com") return null;
-    const memberId = id();
-    await query(
-      `insert into members (id, stage, subject, email, email_norm, name, role)
-       values ($1, $2, $3, $4, $5, $6, 'admin')`,
-      [memberId, stage, identity.sub, email, emailNorm, name],
-    );
-    return {
-      id: memberId,
-      stage,
-      subject: identity.sub ?? "",
-      email,
-      email_norm: emailNorm,
-      name,
-      role: "admin",
-      active: true,
-    };
-  }
-  if (emailNorm === "") return null;
-  const invites = await query<{ id: string; role: Role }>(
-    `select id, role from invites
-     where stage = $1 and email_norm = $2 and accepted_at is null
-     order by created_at asc limit 1`,
-    [stage, emailNorm],
-  );
-  const invite = invites[0];
-  if (!invite || !HUMAN_ROLES.has(invite.role)) return null;
-  const memberId = id();
-  try {
-    await query(
-      `insert into members (id, stage, subject, email, email_norm, name, role)
-       values ($1, $2, $3, $4, $5, $6, $7)`,
-      [memberId, stage, identity.sub, email, emailNorm, name, invite.role],
-    );
-  } catch (error) {
-    if (!isUniqueViolation(error)) throw error;
-    const raced = await query<MemberRow>(
-      `select id, stage, subject, email, email_norm, name, role, active
-       from members where stage = $1 and subject = $2`,
-      [stage, identity.sub],
-    );
-    return raced[0]?.active ? raced[0] : null;
-  }
-  await query(`update invites set accepted_at = now(), created_by = coalesce(created_by, created_by) where id = $1`, [
-    invite.id,
-  ]);
-  await query(`update invites set accepted_at = now() where id = $1`, [invite.id]);
-  return {
-    id: memberId,
-    stage,
-    subject: identity.sub ?? "",
-    email,
-    email_norm: emailNorm,
-    name,
-    role: invite.role,
-    active: true,
-  };
 }
 
 export function assertAdmin(actor: Actor): void {
@@ -467,9 +287,9 @@ export async function saveSettings(actor: Actor, body: Record<string, unknown>):
   return loadSettings(actor.stage);
 }
 
-export async function listPeople(stage: string): Promise<{ id: string; name: string; email: string; role: Role; active: boolean }[]> {
+export async function listPeople(stage: string): Promise<{ id: string; name: string; email: string; username: string | null; role: Role; active: boolean }[]> {
   return sql(
-    `select id, name, email, role, active from members
+    `select id, name, email, username, role, active from members
      where stage = $1 and role <> 'bot'
      order by active desc, name asc`,
     [stage],
@@ -523,7 +343,7 @@ export async function updateMember(actor: Actor, memberId: string, body: Record<
     const role = typeof body.role === "string" ? body.role : member.role;
     const active = typeof body.active === "boolean" ? body.active : member.active;
     if (name.length < 1 || name.length > 80) throw new HttpError(400, "invalid", "이름을 확인하세요.");
-    if (!EMAIL.test(email) || email.length > 200) throw new HttpError(400, "invalid", "이메일을 확인하세요.");
+    if (email !== "" && (!EMAIL.test(email) || email.length > 200)) throw new HttpError(400, "invalid", "이메일을 확인하세요.");
     if (!HUMAN_ROLES.has(role)) throw new HttpError(400, "invalid", "역할이 올바르지 않습니다.");
     if (member.id === actor.memberId && email.toLowerCase() !== member.email_norm) {
       throw new HttpError(400, "invalid", "본인 이메일은 바꿀 수 없습니다.");
@@ -541,7 +361,7 @@ export async function updateMember(actor: Actor, memberId: string, body: Record<
         throw new HttpError(400, "invalid", "마지막 관리자는 역할을 내리거나 비활성화할 수 없습니다.");
       }
     }
-    if (email.toLowerCase() !== member.email_norm) {
+    if (email !== "" && email.toLowerCase() !== member.email_norm) {
       const taken = await query<{ id: string }>(
         `select id from members where stage = $1 and email_norm = $2 and id <> $3`,
         [actor.stage, email.toLowerCase(), member.id],
@@ -556,6 +376,9 @@ export async function updateMember(actor: Actor, memberId: string, body: Record<
        where id = $1 and stage = $2`,
       [member.id, actor.stage, name, email, email.toLowerCase(), role, active],
     );
+    if (!active) {
+      await query(`update sessions set revoked_at = now() where member_id = $1 and revoked_at is null`, [member.id]);
+    }
   });
 }
 
@@ -614,9 +437,8 @@ export async function archiveCategory(actor: Actor, categoryId: string) {
 }
 
 export async function updateCategory(actor: Actor, categoryId: string, body: Record<string, unknown>) {
+  assertAdmin(actor);
   const archived = typeof body.archived === "boolean" ? body.archived : undefined;
-  if (archived === true) assertAdmin(actor);
-  else assertProjectManager(actor);
   if (!isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 찾지 못했습니다.");
   const name = typeof body.name === "string" ? body.name.trim() : undefined;
   if (name != null && (name.length < 1 || name.length > 40)) {

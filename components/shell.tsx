@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { createContext, useContext, useEffect, useRef, useState } from "react";
-import { api, ApiError, roleLabel, type Category, type Person } from "./api";
+import { createContext, useContext, useEffect, useRef, useState, type FormEvent } from "react";
+import { api, ApiError, roleLabel, setCsrf, type Category, type Person } from "./api";
 
 type Note = { id: string; href: string | null; title: string; body: string; readAt: string | null; createdAt: string | null };
 type Me = { id: string; name: string; email: string; role: string };
@@ -52,7 +52,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [dirty, setDirty] = useState(false);
   const [remote, setRemote] = useState(false);
   const [message, setMessage] = useState("");
-  const [phase, setPhase] = useState<"loading" | "ready" | "forbidden" | "login" | "error">("loading");
+  const [phase, setPhase] = useState<"loading" | "ready" | "password" | "login" | "error">("loading");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [nextPassword, setNextPassword] = useState("");
   const [fail, setFail] = useState("");
   const [openNotes, setOpenNotes] = useState(false);
   const [more, setMore] = useState(false);
@@ -73,7 +76,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
         members: Person[];
         today: string;
         notifications: { unread: number; items: Note[] };
+        csrfToken?: string;
       }>("/api/bootstrap");
+      if (data.csrfToken) setCsrf(data.csrfToken);
       setMe(data.me);
       setCategories(data.categories);
       setMembers(data.members);
@@ -82,8 +87,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
       setUnread(data.notifications.unread);
       setPhase("ready");
     } catch (error) {
-      if (error instanceof ApiError && error.status === 403) setPhase("forbidden");
-      else if (error instanceof ApiError && error.status === 401) setPhase("login");
+      if (error instanceof ApiError && error.status === 403 && error.payload?.error === "password_change_required") {
+        if (typeof error.payload.csrfToken === "string") setCsrf(error.payload.csrfToken);
+        setPhase("password");
+      } else if (error instanceof ApiError && error.status === 401) setPhase("login");
       else {
         setFail(error instanceof Error ? error.message : "불러오지 못했습니다.");
         setPhase("error");
@@ -145,14 +152,83 @@ export function Shell({ children }: { children: React.ReactNode }) {
     ?? (pathname.startsWith("/tasks/") ? "업무" : pathname.startsWith("/admin") ? "관리" : pathname.startsWith("/focus") ? "효율" : "물류자동화 업무");
 
   if (phase === "loading") return <p className="state">불러오는 중…</p>;
-  if (phase === "login") {
-    return <main className="content"><h1>로그인이 필요합니다</h1><p>Cursor에 로그인한 뒤 다시 열어 주세요.</p></main>;
+  async function submitLogin(event: FormEvent) {
+    event.preventDefault();
+    setFail("");
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = (await response.json()) as { message?: string; csrfToken?: string; mustChangePassword?: boolean };
+      if (!response.ok) {
+        setFail(data.message ?? "로그인하지 못했습니다.");
+        return;
+      }
+      if (data.csrfToken) setCsrf(data.csrfToken);
+      setPassword("");
+      if (data.mustChangePassword) {
+        setPhase("password");
+        return;
+      }
+      await load();
+    } catch {
+      setFail("네트워크에 연결하지 못했습니다.");
+    }
   }
-  if (phase === "forbidden") {
+
+  async function submitPassword(event: FormEvent) {
+    event.preventDefault();
+    setFail("");
+    try {
+      const data = await api<{ csrfToken?: string }>("/api/auth/password", {
+        method: "POST",
+        mutate: true,
+        body: JSON.stringify({ currentPassword: password, newPassword: nextPassword }),
+      });
+      if (data.csrfToken) setCsrf(data.csrfToken);
+      setPassword("");
+      setNextPassword("");
+      await load();
+    } catch (error) {
+      setFail(error instanceof Error ? error.message : "비밀번호를 바꾸지 못했습니다.");
+    }
+  }
+
+  async function logout() {
+    try {
+      await api("/api/auth/logout", { method: "POST", mutate: true, body: "{}" });
+    } catch {
+      /* 쿠키가 이미 없어도 로그인 화면으로 돌아간다. */
+    }
+    setCsrf("");
+    setMe(null);
+    setPhase("login");
+  }
+
+  if (phase === "login" || phase === "password") {
     return (
-      <main className="content">
-        <h1>초대가 필요합니다</h1>
-        <p>물류자동화팀 업무는 초대된 멤버만 볼 수 있습니다. 관리자에게 이메일 초대를 요청하세요.</p>
+      <main className="login-wrap">
+        <form className="login-card" onSubmit={(event) => void (phase === "login" ? submitLogin(event) : submitPassword(event))}>
+          <h1>{phase === "login" ? "로그인" : "비밀번호 변경"}</h1>
+          <p className="hint">{phase === "login" ? "사용자 이름과 비밀번호로 들어갑니다." : "처음 로그인하거나 비밀번호가 초기화된 뒤에는 새 비밀번호가 필요합니다."}</p>
+          {phase === "login" ? (
+            <label className="stack">사용자 이름
+              <input className="field" name="username" autoComplete="username" aria-label="사용자 이름" value={username} onChange={(event) => setUsername(event.target.value)} required />
+            </label>
+          ) : null}
+          <label className="stack">{phase === "login" ? "비밀번호" : "지금 비밀번호"}
+            <input className="field" name="password" type="password" autoComplete={phase === "login" ? "current-password" : "current-password"} aria-label={phase === "login" ? "비밀번호" : "지금 비밀번호"} value={password} onChange={(event) => setPassword(event.target.value)} required />
+          </label>
+          {phase === "password" ? (
+            <label className="stack">새 비밀번호
+              <input className="field" name="new-password" type="password" autoComplete="new-password" aria-label="새 비밀번호" value={nextPassword} onChange={(event) => setNextPassword(event.target.value)} required />
+            </label>
+          ) : null}
+          {fail ? <p className="hint">{fail}</p> : null}
+          <button className="btn primary" type="submit">{phase === "login" ? "로그인" : "비밀번호 저장"}</button>
+        </form>
       </main>
     );
   }
@@ -185,7 +261,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
             ))}
             {me.role === "admin" ? <Link href="/admin" className={pathname === "/admin" ? "active" : ""}>관리</Link> : null}
           </nav>
-          <div className="meta">{me.name} · {roleLabel(me.role)}</div>
+          <div className="meta">
+            <div>{me.name} · {roleLabel(me.role)}</div>
+            <button className="btn" type="button" onClick={() => void logout()}>로그아웃</button>
+          </div>
         </aside>
         <div className="main">
           <header className="top">

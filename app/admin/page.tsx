@@ -21,7 +21,7 @@ type Settings = {
   notifications: { inApp: boolean; dueSoon: boolean; overdue: boolean; stale: boolean; mentions: boolean };
 };
 type StatePayload = {
-  members: { id: string; name: string; email: string; role: string; active: boolean }[];
+  members: { id: string; name: string; email: string; username: string | null; role: string; active: boolean }[];
   invites: { id: string; email: string; role: string; acceptedAt: string | null }[];
   categories: { id: string; name: string; archived: boolean }[];
   settings: Settings;
@@ -32,7 +32,7 @@ type StatePayload = {
 };
 
 const DAYS = [["월", 1], ["화", 2], ["수", 3], ["목", 4], ["금", 5]] as const;
-type MemberRow = { id: string; name: string; email: string; role: string; active: boolean };
+type MemberRow = { id: string; name: string; email: string; username: string | null; role: string; active: boolean };
 
 function memberDiffs(before: MemberRow, after: MemberRow) {
   const rows: { label: string; from: string; to: string }[] = [];
@@ -47,8 +47,11 @@ export default function AdminPage() {
   const { me, online, toast, reload } = useApp();
   const [data, setData] = useState<StatePayload | null>(null);
   const [error, setError] = useState("");
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
+  const [accountName, setAccountName] = useState("");
+  const [accountPassword, setAccountPassword] = useState("");
   const [role, setRole] = useState("member");
+  const [resetPassword, setResetPassword] = useState("");
   const [holidayDay, setHolidayDay] = useState("");
   const [holidayName, setHolidayName] = useState("");
   const [editing, setEditing] = useState<StatePayload["members"][number] | null>(null);
@@ -91,16 +94,38 @@ export default function AdminPage() {
     }
   }
 
-  async function invite(event: React.FormEvent) {
+  async function createAccount(event: React.FormEvent) {
     event.preventDefault();
     if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
     try {
-      await api("/api/admin/invites", { method: "POST", mutate: true, body: JSON.stringify({ email, role }) });
-      setEmail("");
-      toast("저장했습니다.");
+      await api("/api/admin/accounts", {
+        method: "POST",
+        mutate: true,
+        body: JSON.stringify({ username, name: accountName, role, password: accountPassword }),
+      });
+      setUsername("");
+      setAccountName("");
+      setAccountPassword("");
+      toast("계정을 만들었습니다. 처음 로그인하면 비밀번호를 바꿔야 합니다.");
       load();
     } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "초대하지 못했습니다.");
+      toast(reason instanceof Error ? reason.message : "계정을 만들지 못했습니다.");
+    }
+  }
+
+  async function resetAccount() {
+    if (!editing) return;
+    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
+    try {
+      await api(`/api/admin/accounts/${editing.id}/password`, {
+        method: "POST",
+        mutate: true,
+        body: JSON.stringify({ password: resetPassword }),
+      });
+      setResetPassword("");
+      toast("비밀번호를 다시 지정했습니다. 기존 로그인은 끊깁니다.");
+    } catch (reason) {
+      toast(reason instanceof Error ? reason.message : "비밀번호를 바꾸지 못했습니다.");
     }
   }
 
@@ -139,35 +164,38 @@ export default function AdminPage() {
   return (
     <div className="list">
       <section className="panel">
-        <h2>멤버와 역할</h2>
-        <form className="filters" onSubmit={(event) => void invite(event)}>
-          <input className="field grow" type="email" required aria-label="초대 이메일" placeholder="name@company.com" value={email} onChange={(event) => setEmail(event.target.value)} />
+        <h2>계정</h2>
+        <form className="filters" onSubmit={(event) => void createAccount(event)}>
+          <input className="field grow" required aria-label="사용자 이름" placeholder="사용자 이름" autoComplete="off" value={username} onChange={(event) => setUsername(event.target.value)} />
+          <input className="field grow" required aria-label="이름" placeholder="이름" value={accountName} onChange={(event) => setAccountName(event.target.value)} />
+          <input className="field grow" required type="password" aria-label="처음 비밀번호" placeholder="처음 비밀번호" autoComplete="new-password" value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} />
           <select className="control" aria-label="역할" value={role} onChange={(event) => setRole(event.target.value)}>
             <option value="admin">관리자</option>
             <option value="manager">매니저</option>
             <option value="member">멤버</option>
             <option value="viewer">뷰어</option>
           </select>
-          <button className="btn primary mutate" disabled={!online}>초대</button>
+          <button className="btn primary mutate" disabled={!online}>계정 만들기</button>
         </form>
+        <p className="hint">관리자가 계정을 만들고 처음 비밀번호를 지정합니다. 이메일 인증은 없습니다. 그 비밀번호로 처음 들어오면 바로 바꿔야 합니다.</p>
         <div className="table-wrap">
           <table className="grid">
-            <thead><tr><th>이름</th><th>이메일</th><th>역할</th><th>상태</th><th /></tr></thead>
+            <thead><tr><th>이름</th><th>사용자 이름</th><th>이메일</th><th>역할</th><th>상태</th><th /></tr></thead>
             <tbody>
               {data.members.map((member) => (
                 <tr key={member.id}>
                   <td>{member.name}</td>
-                  <td>{member.email}</td>
+                  <td>{member.username || "—"}</td>
+                  <td>{member.email || "—"}</td>
                   <td>{roleLabel(member.role)}</td>
                   <td>{member.active ? "사용 중" : "비활성"}</td>
-                  <td><button className="btn" type="button" onClick={() => { setEditing(member); setDraft({ ...member }); setConfirming(false); }}>편집</button></td>
+                  <td><button className="btn" type="button" onClick={() => { setEditing(member); setDraft({ ...member }); setConfirming(false); setResetPassword(""); }}>편집</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
         <p className="hint">계정에 있는 항목은 이름, 이메일, 역할, 사용 여부입니다. 소속 팀 칸은 없습니다.</p>
-        <p className="hint">대기 중 초대 {data.invites.filter((invite) => !invite.acceptedAt).length}건</p>
         {editing && draft ? (
           <div className="scrim" role="presentation">
             <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="member-edit-title">
@@ -179,7 +207,7 @@ export default function AdminPage() {
                       <li key={row.label}><b>{row.label}</b> {row.from} → {row.to}</li>
                     ))}
                   </ul>
-                  {editing.email !== draft.email ? <p className="hint">계정은 Cursor에 로그인한 이메일로 찾습니다. 저장한 이메일은 그 사람이 다음 로그인하면 Cursor 이메일로 다시 덮입니다. 로그인 자체를 다른 사람으로 바꾸지는 않습니다.</p> : null}
+                  {editing.email !== draft.email ? <p className="hint">이메일은 연락용입니다. 로그인은 사용자 이름으로 합니다.</p> : null}
                   <div className="row">
                     <button className="btn" type="button" onClick={() => setConfirming(false)}>뒤로</button>
                     <button className="btn primary mutate" type="button" disabled={!online} onClick={() => void saveMember()}>저장</button>
@@ -194,8 +222,11 @@ export default function AdminPage() {
                   <label className="stack">이름
                     <input className="field" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required />
                   </label>
+                  <label className="stack">사용자 이름
+                    <input className="field" value={draft.username ?? ""} disabled />
+                  </label>
                   <label className="stack">이메일
-                    <input className="field" type="email" value={draft.email} disabled={editing.id === me.id} onChange={(event) => setDraft({ ...draft, email: event.target.value })} required />
+                    <input className="field" type="email" value={draft.email} disabled={editing.id === me.id} onChange={(event) => setDraft({ ...draft, email: event.target.value })} />
                   </label>
                   {editing.id === me.id ? <p className="hint">본인 이메일은 바꿀 수 없습니다.</p> : null}
                   <label className="stack">역할
@@ -210,6 +241,12 @@ export default function AdminPage() {
                     <input type="checkbox" checked={draft.active} disabled={editing.id === me.id} onChange={(event) => setDraft({ ...draft, active: event.target.checked })} />
                     사용 중
                   </label>
+                  <label className="stack">비밀번호 다시 지정
+                    <input className="field" type="password" autoComplete="new-password" aria-label="임시 비밀번호" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} />
+                  </label>
+                  <div className="row">
+                    <button className="btn" type="button" disabled={!online || resetPassword.length < 10} onClick={() => void resetAccount()}>비밀번호 초기화</button>
+                  </div>
                   <div className="row">
                     <button className="btn" type="button" onClick={() => { setEditing(null); setDraft(null); setConfirming(false); }}>취소</button>
                     <button className="btn primary" type="submit">확인</button>

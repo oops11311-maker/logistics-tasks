@@ -9,7 +9,7 @@ npm install
 env -u DATABASE_URL npm run dev
 ```
 
-브라우저에서 `http://127.0.0.1:3000`을 엽니다. 로컬 서버는 서명된 Cursor 로그인이 아니라 `cursor/identity.dev.js`의 시뮬레이트된 뷰어(Dev Viewer)로 동작합니다. 그 파일은 배포된 앱에서 읽히지 않습니다.
+브라우저에서 `http://127.0.0.1:3000`을 열면 로그인 화면이 나옵니다. 세션 없이 업무 데이터는 나오지 않습니다.
 
 테스트:
 
@@ -27,4 +27,4 @@ env -u DATABASE_URL npm run migrate
 
 ## 비밀값
 
-봇 API는 `BOT_API_TOKEN`, 스케줄 웹훅은 `SCHEDULER_TOKEN`입니다. 값은 코드에 없습니다. 운영 설명은 `docs/operations.md`, 봇 호출 예시는 `docs/bot-api.md`입니다.
+봇 API는 `BOT_API_TOKEN`, 스케줄 웹훅은 `SCHEDULER_TOKEN`, 기존 관리자 비밀번호가 비어 있을 때의 처음 값은 `INITIAL_ADMIN_PASSWORD`입니다. 값은 코드에 없습니다. 운영 설명은 `docs/operations.md`, 봇 호출 예시는 `docs/bot-api.md`입니다.

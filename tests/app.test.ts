@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import { createSign, generateKeyPairSync, randomBytes, randomUUID, type KeyObject } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,7 +30,8 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
   delete process.env.VERCEL;
   const { handle } = await import("../src/lib/router.ts");
   const { sql, closeDb } = await import("../src/lib/db.ts");
-  const { applyInitialAdminPassword } = await import("../src/lib/auth.ts");
+  let identityServer: Server | undefined;
+  let identityKey: KeyObject | undefined;
   const admin = { sub: "user:admin-a", email: "oops11311@gmail.com", name: "관리자", kind: "person" };
   const mina = { sub: "user:mina", email: "mina@example.com", name: "미나", kind: "person" };
   const juno = { sub: "user:juno", email: "juno@example.com", name: "준호", kind: "person" };
@@ -158,8 +160,6 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
 
     const adminId = randomUUID();
     const keptId = randomUUID();
-    const initial = generated();
-    process.env.INITIAL_ADMIN_PASSWORD = initial;
     await sql(
       `insert into members (id, stage, subject, email, email_norm, name, role, active)
        values ($1, 'production', $2, $3, $4, $5, 'admin', true)`,
@@ -170,42 +170,133 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
        values ($1, 'production', '기존 담당 업무', $2, $2, '보통', '할 일')`,
       [keptId, adminId],
     );
-    const applied = await applyInitialAdminPassword();
-    assert.equal(applied.applied, true);
-    delete process.env.INITIAL_ADMIN_PASSWORD;
-    assert.equal((await applyInitialAdminPassword()).applied, false);
     const usernameMigration = await readFile(path.join(process.cwd(), "migrations/005_admin_username.sql"), "utf8");
     for (const statement of usernameMigration.split(";").map((part) => part.trim()).filter(Boolean)) {
       await sql(statement);
       await sql(statement);
     }
-    const stored = await sql<{ password_hash: string; username_norm: string }>(
-      `select password_hash, username_norm from members where id = $1`,
+    const beforeSetup = await sql<{ password_hash: string | null; username_norm: string; name: string; email_norm: string }>(
+      `select password_hash, username_norm, name, email_norm from members where id = $1`,
+      [adminId],
+    );
+    assert.equal(beforeSetup[0].password_hash, null);
+    assert.equal(beforeSetup[0].username_norm, "limjaeyeol");
+    assert.equal(beforeSetup[0].name, admin.name);
+    assert.equal(beforeSetup[0].email_norm, admin.email);
+    const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    identityKey = pair.privateKey;
+    const jwk = pair.publicKey.export({ format: "jwk" });
+    identityServer = createServer((req, res) => {
+      if (req.url === "/keys") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          keys: [{ kty: "RSA", kid: "setup-test", alg: "RS256", use: "sig", n: jwk.n, e: jwk.e }],
+        }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => identityServer?.listen(0, "127.0.0.1", () => resolve()));
+    const address = identityServer.address();
+    if (address === null || typeof address === "string") throw new Error("issuer");
+    process.env.CURSOR_APP_ID = "logistics-setup-test";
+    process.env.CURSOR_APP_IDENTITY_ISSUER = `http://127.0.0.1:${address.port}`;
+    function signPerson(email: string): string {
+      const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: "setup-test" })).toString("base64url");
+      const now = Math.floor(Date.now() / 1000);
+      const payload = Buffer.from(JSON.stringify({
+        iss: process.env.CURSOR_APP_IDENTITY_ISSUER,
+        aud: process.env.CURSOR_APP_ID,
+        sub: "user:42",
+        iat: now,
+        exp: now + 300,
+        email,
+        email_verified: true,
+        name: "Signed",
+        idp: { provider: "cursor", sub: "42" },
+        kind: "person",
+        ver: 2,
+        app_visibility: "private",
+      })).toString("base64url");
+      const data = `${header}.${payload}`;
+      const signature = createSign("RSA-SHA256").update(data).sign(identityKey as KeyObject).toString("base64url");
+      return `${data}.${signature}`;
+    }
+    const ownerToken = signPerson(admin.email);
+    const otherToken = signPerson("other@example.com");
+    const unsigned = await call("GET", "/api/auth/admin-setup");
+    assert.equal(unsigned.status, 403);
+    assert.equal(unsigned.data.open, false);
+    const forged = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": "forged.not-a.token" } });
+    assert.equal(forged.status, 403);
+    assert.equal(forged.data.open, false);
+    const otherView = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": otherToken } });
+    assert.equal(otherView.status, 403);
+    assert.equal(otherView.data.open, false);
+    const opened = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": ownerToken } });
+    assert.equal(opened.status, 200, JSON.stringify(opened.data));
+    assert.equal(opened.data.open, true);
+    assert.equal(typeof opened.data.csrfToken, "string");
+    const setupLine = opened.headers.getSetCookie().find((item) => item.startsWith("logistics_setup="));
+    assert.ok(setupLine);
+    assert.equal(setupLine?.includes("HttpOnly"), true);
+    assert.equal(setupLine?.includes("Secure"), true);
+    assert.match(setupLine ?? "", /SameSite=Lax/i);
+    const setupCookie = setupLine?.split(";")[0] ?? "";
+    async function setupPost(token: string | undefined, body: unknown, csrf = true) {
+      const headers: Record<string, string> = {};
+      if (token) headers["x-cursor-identity-v2"] = token;
+      if (setupCookie) headers.cookie = setupCookie;
+      if (csrf) headers["x-csrf-token"] = opened.data.csrfToken;
+      return call("POST", "/api/auth/admin-setup", { headers, body });
+    }
+    assert.equal((await call("POST", "/api/auth/admin-setup", { body: { password: generated(), confirm: generated() } })).status, 403);
+    assert.equal((await setupPost(otherToken, { password: generated(), confirm: generated() })).status, 403);
+    assert.equal((await setupPost("forged.not-a.token", { password: generated(), confirm: generated() })).status, 403);
+    const plainHeader = await call("POST", "/api/auth/admin-setup", {
+      headers: { "x-cursor-identity": admin.email, cookie: setupCookie, "x-csrf-token": opened.data.csrfToken },
+      body: { password: generated(), confirm: generated() },
+    });
+    assert.equal(plainHeader.status, 403);
+    assert.equal((await setupPost(ownerToken, { password: generated(), confirm: generated() }, false)).status, 403);
+    const mismatched = generated();
+    assert.equal((await setupPost(ownerToken, { password: mismatched, confirm: generated() })).status, 400);
+    assert.equal((await setupPost(ownerToken, { password: "short", confirm: "short" })).status, 400);
+    const stillEmpty = await sql<{ password_hash: string | null }>(`select password_hash from members where id = $1`, [adminId]);
+    assert.equal(stillEmpty[0].password_hash, null);
+    const chosen = generated();
+    const setupRace = await Promise.all([
+      setupPost(ownerToken, { password: chosen, confirm: chosen }),
+      setupPost(ownerToken, { password: chosen, confirm: chosen }),
+    ]);
+    assert.deepEqual(setupRace.map((item) => item.status).sort(), [200, 409]);
+    const stored = await sql<{ password_hash: string; username_norm: string; name: string; email: string; email_norm: string }>(
+      `select password_hash, username_norm, name, email, email_norm from members where id = $1`,
       [adminId],
     );
     assert.match(stored[0].password_hash, /^scrypt\$/);
-    assert.equal(stored[0].password_hash.includes(initial), false);
+    assert.equal(stored[0].password_hash.includes(chosen), false);
     assert.equal(stored[0].username_norm, "limjaeyeol");
+    assert.equal(stored[0].name, admin.name);
+    assert.equal(stored[0].email, admin.email);
+    assert.equal(stored[0].email_norm, admin.email);
+    const closed = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": ownerToken } });
+    assert.equal(closed.status, 200);
+    assert.equal(closed.data.open, false);
+    const repeatSetup = generated();
+    assert.equal((await setupPost(ownerToken, { password: repeatSetup, confirm: repeatSetup })).status, 409);
+    delete process.env.CURSOR_APP_ID;
+    delete process.env.CURSOR_APP_IDENTITY_ISSUER;
+    identityServer.close();
+    identityServer = undefined;
     const keptBefore = await call("GET", `/api/tasks/${keptId}`);
     assert.equal(keptBefore.status, 401);
-    assert.equal((await call("POST", "/api/auth/login", { body: { username: admin.email, password: initial } })).status, 401);
-    const first = await call("POST", "/api/auth/login", { body: { username: "limjaeyeol", password: initial } });
+    assert.equal((await call("POST", "/api/auth/login", { body: { username: admin.email, password: chosen } })).status, 401);
+    const first = await call("POST", "/api/auth/login", { body: { username: "limjaeyeol", password: chosen } });
     assert.equal(first.status, 200, JSON.stringify(first.data));
-    assert.equal(first.data.mustChangePassword, true);
+    assert.equal(first.data.mustChangePassword, false);
     remember(admin.email, first);
-    const blocked = await call("GET", "/api/bootstrap", { actor: admin });
-    assert.equal(blocked.status, 403);
-    assert.equal(blocked.data.error, "password_change_required");
-    const missingCsrf = await call("POST", "/api/auth/password", {
-      actor: admin,
-      csrf: false,
-      body: { currentPassword: initial, newPassword: generated() },
-    });
-    assert.equal(missingCsrf.status, 403);
-    const previousCookie = sessions.get(admin.email)?.cookie ?? "";
-    await loginActor(admin, "limjaeyeol", initial);
-    const invalidated = await call("GET", "/api/bootstrap", { headers: { cookie: previousCookie } });
-    assert.equal(invalidated.status, 401);
     const kept = await call("GET", `/api/tasks/${keptId}`, { actor: admin });
     assert.equal(kept.status, 200);
     assert.equal(kept.data.task.owner.id, adminId);
@@ -227,6 +318,11 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
 
     assert.equal((await call("POST", "/api/admin/accounts", { body: { username: "nope", name: "없음", role: "member", password: generated() } })).status, 401);
     await createAndLogin(mina, "mina", "member");
+    assert.equal((await call("POST", "/api/auth/password", {
+      actor: mina,
+      csrf: false,
+      body: { currentPassword: latestPassword.get(mina.email), newPassword: generated() },
+    })).status, 403);
     await createAndLogin(juno, "juno", "member");
     const minaBoot = await call("GET", "/api/bootstrap", { actor: mina });
     const junoBoot = await call("GET", "/api/bootstrap", { actor: juno });
@@ -596,6 +692,9 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     await runNode("tests/restart-read.ts", restartDir);
     await rm(restartDir, { recursive: true, force: true });
   } finally {
+    delete process.env.CURSOR_APP_ID;
+    delete process.env.CURSOR_APP_IDENTITY_ISSUER;
+    identityServer?.close();
     await closeDb();
     await rm(dir, { recursive: true, force: true });
   }

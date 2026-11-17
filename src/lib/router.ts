@@ -19,7 +19,7 @@ import {
   type Actor,
   type Stage,
 } from "./access";
-import { assertCsrf, changeOwnPassword, createAccount, ensureInitialAdminPassword, login, logout, resetAccountPassword, resolveSession } from "./auth";
+import { adminSetupPassword, adminSetupStatus, assertCsrf, changeOwnPassword, createAccount, login, logout, resetAccountPassword, resolveSession } from "./auth";
 import { sql } from "./db";
 import { asIso } from "./format";
 import {
@@ -264,7 +264,6 @@ async function adminState(actor: Actor, now: Date) {
 
 export async function handle(request: Request): Promise<Response> {
   try {
-    await ensureInitialAdminPassword();
     const url = new URL(request.url);
     const parts = url.pathname.split("/").filter(Boolean);
     if (parts[0] !== "api") return json({ error: "not_found", message: "없는 주소입니다." }, 404);
@@ -275,6 +274,10 @@ export async function handle(request: Request): Promise<Response> {
     if (path[0] === "auth" && path[1] === "login" && method === "POST") {
       assertSameOrigin(request);
       return await login(request, await readJson(request));
+    }
+    if (path[0] === "auth" && path[1] === "admin-setup" && method === "GET") return await adminSetupStatus(request);
+    if (path[0] === "auth" && path[1] === "admin-setup" && method === "POST") {
+      return await adminSetupPassword(request, await readJson(request));
     }
     if (path[0] === "bot") return await botRoute(request, method, path.slice(1), url, now);
     if (path[0] === "jobs" && path[1] === "webhook") return await webhook(request, now);

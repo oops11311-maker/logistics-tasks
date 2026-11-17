@@ -52,9 +52,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [dirty, setDirty] = useState(false);
   const [remote, setRemote] = useState(false);
   const [message, setMessage] = useState("");
-  const [phase, setPhase] = useState<"loading" | "ready" | "password" | "login" | "error">("loading");
+  const [phase, setPhase] = useState<"loading" | "ready" | "password" | "login" | "setup" | "error">("loading");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [setupCsrf, setSetupCsrf] = useState("");
   const [nextPassword, setNextPassword] = useState("");
   const [fail, setFail] = useState("");
   const [openNotes, setOpenNotes] = useState(false);
@@ -90,7 +92,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
       if (error instanceof ApiError && error.status === 403 && error.payload?.error === "password_change_required") {
         if (typeof error.payload.csrfToken === "string") setCsrf(error.payload.csrfToken);
         setPhase("password");
-      } else if (error instanceof ApiError && error.status === 401) setPhase("login");
+      } else if (error instanceof ApiError && error.status === 401) await showLogin();
       else {
         setFail(error instanceof Error ? error.message : "불러오지 못했습니다.");
         setPhase("error");
@@ -152,6 +154,51 @@ export function Shell({ children }: { children: React.ReactNode }) {
     ?? (pathname.startsWith("/tasks/") ? "업무" : pathname.startsWith("/admin") ? "관리" : pathname.startsWith("/focus") ? "효율" : "물류자동화 업무");
 
   if (phase === "loading") return <p className="state">불러오는 중…</p>;
+  async function showLogin() {
+    setSetupCsrf("");
+    try {
+      const response = await fetch("/api/auth/admin-setup");
+      const data = (await response.json()) as { open?: boolean; csrfToken?: string };
+      if (response.ok && data.open === true && typeof data.csrfToken === "string" && data.csrfToken !== "") {
+        setSetupCsrf(data.csrfToken);
+        setPhase("setup");
+        return;
+      }
+    } catch {
+      /* 확인되지 않으면 설정 단계를 열지 않는다. */
+    }
+    setPhase("login");
+  }
+
+  async function submitSetup(event: FormEvent) {
+    event.preventDefault();
+    setFail("");
+    try {
+      const response = await fetch("/api/auth/admin-setup", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-csrf-token": setupCsrf },
+        body: JSON.stringify({ password, confirm: confirmPassword }),
+      });
+      const data = (await response.json()) as { message?: string };
+      if (!response.ok) {
+        setFail(data.message ?? "비밀번호를 설정하지 못했습니다.");
+        if (response.status === 409 || response.status === 403) {
+          setPassword("");
+          setConfirmPassword("");
+          setSetupCsrf("");
+          setPhase("login");
+        }
+        return;
+      }
+      setPassword("");
+      setConfirmPassword("");
+      setSetupCsrf("");
+      setPhase("login");
+    } catch {
+      setFail("네트워크에 연결하지 못했습니다.");
+    }
+  }
+
   async function submitLogin(event: FormEvent) {
     event.preventDefault();
     setFail("");
@@ -204,7 +251,26 @@ export function Shell({ children }: { children: React.ReactNode }) {
     }
     setCsrf("");
     setMe(null);
-    setPhase("login");
+    await showLogin();
+  }
+
+  if (phase === "setup") {
+    return (
+      <main className="login-wrap">
+        <form className="login-card" onSubmit={(event) => void submitSetup(event)}>
+          <h1>최초 관리자 비밀번호 설정</h1>
+          <p className="hint">한 번만 설정합니다. 설정한 뒤에는 이 단계가 닫히고, 사용자 이름 limjaeyeol로 로그인합니다.</p>
+          <label className="stack">비밀번호
+            <input className="field" name="new-password" type="password" autoComplete="new-password" aria-label="최초 비밀번호" minLength={10} value={password} onChange={(event) => setPassword(event.target.value)} required />
+          </label>
+          <label className="stack">비밀번호 확인
+            <input className="field" name="confirm-password" type="password" autoComplete="new-password" aria-label="최초 비밀번호 확인" minLength={10} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required />
+          </label>
+          {fail ? <p className="hint">{fail}</p> : null}
+          <button className="btn primary" type="submit">비밀번호 설정</button>
+        </form>
+      </main>
+    );
   }
 
   if (phase === "login" || phase === "password") {

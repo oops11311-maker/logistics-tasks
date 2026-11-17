@@ -27,4 +27,4 @@ env -u DATABASE_URL npm run migrate
 
 ## 비밀값
 
-봇 API는 `BOT_API_TOKEN`, 스케줄 웹훅은 `SCHEDULER_TOKEN`, 기존 관리자 비밀번호가 비어 있을 때의 처음 값은 `INITIAL_ADMIN_PASSWORD`입니다. 값은 코드에 없습니다. 운영 설명은 `docs/operations.md`, 봇 호출 예시는 `docs/bot-api.md`입니다.
+봇 API는 `BOT_API_TOKEN`, 스케줄 웹훅은 `SCHEDULER_TOKEN`입니다. 값은 코드에 없습니다. 기존 관리자 비밀번호는 비공개로 게시한 뒤 로그인 화면에서 한 번 설정합니다. 운영 설명은 `docs/operations.md`, 봇 호출 예시는 `docs/bot-api.md`입니다.

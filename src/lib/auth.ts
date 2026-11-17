@@ -1,12 +1,16 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { getIdentity } from "../../cursor/identity.js";
 import { FIRST_ADMIN_EMAIL, assertUsername, normalizeUsername, requestStage, type Actor, type Role, type Stage } from "./access";
 import { sql } from "./db";
 import { id } from "./format";
-import { HttpError, isUniqueViolation, rateLimit } from "./http";
+import { HttpError, assertSameOrigin, isUniqueViolation, rateLimit } from "./http";
 import { hashPassword, verifyPassword } from "./passwords";
 
 const SESSION_COOKIE = "logistics_session";
+const SETUP_COOKIE = "logistics_setup";
 const SESSION_SECONDS = 60 * 60 * 12;
+const SETUP_SECONDS = 60 * 10;
+const ADMIN_USERNAME = "limjaeyeol";
 const USERNAME = /^[a-z0-9._@-]{3,80}$/;
 const HUMAN_ROLES = new Set(["admin", "manager", "member", "viewer"]);
 
@@ -86,48 +90,109 @@ export async function revokeMemberSessions(memberId: string): Promise<void> {
   await sql(`update sessions set revoked_at = now() where member_id = $1 and revoked_at is null`, [memberId]);
 }
 
-export async function applyInitialAdminPassword(): Promise<{ applied: boolean }> {
-  const password = process.env.INITIAL_ADMIN_PASSWORD?.trim() ?? "";
-  if (password.length < 10 || password.length > 200) return { applied: false };
-  const rows = await sql<{ id: string; email_norm: string; username_norm: string | null; password_hash: string | null }>(
-    `select id, email_norm, username_norm, password_hash
-     from members
-     where role = 'admin' and email_norm = $1 and password_hash is null`,
-    [FIRST_ADMIN_EMAIL],
-  );
-  if (rows.length === 0) return { applied: false };
-  const hash = await hashPassword(password);
-  let applied = false;
-  for (const row of rows) {
-    const username = row.username_norm && row.username_norm !== "" ? row.username_norm : row.email_norm;
-    const updated = await sql<{ id: string }>(
-      `update members
-       set password_hash = $2,
-           username = coalesce(nullif(username, ''), $3),
-           username_norm = coalesce(nullif(username_norm, ''), $3),
-           must_change_password = true,
-           password_version = password_version + 1,
-           updated_at = now()
-       where id = $1 and password_hash is null
-       returning id`,
-      [row.id, hash, username],
-    );
-    if (updated[0]) applied = true;
-  }
-  return { applied };
+type GateIdentity = {
+  verified: boolean;
+  simulated?: boolean;
+  kind?: string;
+  email?: string;
+  emailVerified?: boolean;
+};
+
+async function signedOwner(request: Request): Promise<boolean> {
+  const identity = (await getIdentity(request)) as GateIdentity;
+  if (!identity.verified || identity.simulated === true) return false;
+  if (identity.kind !== "person" || identity.emailVerified !== true) return false;
+  const email = typeof identity.email === "string" ? identity.email.trim().toLowerCase() : "";
+  return email === FIRST_ADMIN_EMAIL;
 }
 
-let ensureOnce: Promise<void> | undefined;
+async function limitSetup(request: Request): Promise<void> {
+  const allowed = await rateLimit(`setup:ip:${clientIp(request)}`, 20);
+  if (!allowed) throw new HttpError(429, "rate", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.");
+}
 
-export function ensureInitialAdminPassword(): Promise<void> {
-  ensureOnce ??= applyInitialAdminPassword().then(
-    () => undefined,
-    (error: unknown) => {
-      ensureOnce = undefined;
-      throw error;
-    },
+async function adminPasswordUnset(stage: Stage): Promise<boolean> {
+  const rows = await sql<{ id: string }>(
+    `select id from members
+     where stage = $1 and username_norm = $2 and role = 'admin' and coalesce(password_hash, '') = ''
+     limit 1`,
+    [stage, ADMIN_USERNAME],
   );
-  return ensureOnce;
+  return Boolean(rows[0]);
+}
+
+function setupCookie(token: string): string {
+  return `${SETUP_COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${SETUP_SECONDS}`;
+}
+
+async function issueSetupChallenge(): Promise<{ token: string; csrf: string }> {
+  const token = randomBytes(32).toString("base64url");
+  const csrf = randomBytes(32).toString("base64url");
+  await sql(`delete from setup_challenges where expires_at < now()`);
+  await sql(
+    `insert into setup_challenges (id, token_hash, csrf_token, expires_at)
+     values ($1, $2, $3, now() + interval '10 minutes')`,
+    [id(), tokenHash(token), csrf],
+  );
+  return { token, csrf };
+}
+
+async function assertSetupCsrf(request: Request): Promise<void> {
+  const token = readCookie(request, SETUP_COOKIE);
+  const given = request.headers.get("x-csrf-token") ?? "";
+  if (!token || given === "") throw new HttpError(403, "csrf", "요청을 확인하지 못했습니다. 다시 열어 주세요.");
+  const rows = await sql<{ csrf_token: string }>(
+    `select csrf_token from setup_challenges
+     where token_hash = $1 and expires_at > now()`,
+    [tokenHash(token)],
+  );
+  const expected = rows[0]?.csrf_token ?? "";
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  if (expected === "" || a.length !== b.length || !timingSafeEqual(a, b)) {
+    throw new HttpError(403, "csrf", "요청을 확인하지 못했습니다. 다시 열어 주세요.");
+  }
+}
+
+export async function adminSetupStatus(request: Request): Promise<Response> {
+  await limitSetup(request);
+  if (!(await signedOwner(request))) {
+    return jsonResponse({ open: false, error: "forbidden", message: "이 단계를 사용할 수 없습니다." }, 403, new Headers());
+  }
+  const stage = await requestStage(request);
+  if (!(await adminPasswordUnset(stage))) return jsonResponse({ open: false }, 200, new Headers());
+  const issued = await issueSetupChallenge();
+  const headers = new Headers();
+  headers.append("set-cookie", setupCookie(issued.token));
+  return jsonResponse({ open: true, csrfToken: issued.csrf }, 200, headers);
+}
+
+export async function adminSetupPassword(request: Request, body: Record<string, unknown>): Promise<Response> {
+  assertSameOrigin(request);
+  await limitSetup(request);
+  if (!(await signedOwner(request))) throw new HttpError(403, "forbidden", "이 단계를 사용할 수 없습니다.");
+  await assertSetupCsrf(request);
+  const password = typeof body.password === "string" ? body.password : "";
+  const confirm = typeof body.confirm === "string" ? body.confirm : "";
+  if (password !== confirm) throw new HttpError(400, "invalid", "비밀번호 확인이 일치하지 않습니다.");
+  assertPassword(password, ADMIN_USERNAME);
+  const hash = await hashPassword(password);
+  const stage = await requestStage(request);
+  const updated = await sql<{ id: string }>(
+    `update members
+     set password_hash = $3,
+         must_change_password = false,
+         password_version = password_version + 1,
+         updated_at = now()
+     where stage = $1
+       and username_norm = $2
+       and role = 'admin'
+       and coalesce(password_hash, '') = ''
+     returning id`,
+    [stage, ADMIN_USERNAME, hash],
+  );
+  if (!updated[0]) throw new HttpError(409, "conflict", "이미 설정된 비밀번호입니다.");
+  return jsonResponse({ ok: true }, 200, new Headers());
 }
 
 export async function resolveSession(request: Request): Promise<SessionActor> {

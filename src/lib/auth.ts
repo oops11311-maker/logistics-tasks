@@ -1,9 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { getIdentity } from "../../cursor/identity.js";
-import { FIRST_ADMIN_EMAIL, assertUsername, normalizeUsername, requestStage, type Actor, type Role, type Stage } from "./access";
+import { assertUsername, normalizeUsername, requestStage, type Actor, type Role, type Stage } from "./access";
+import { setupOwner } from "./setup-gate";
 import { sql } from "./db";
 import { id } from "./format";
-import { HttpError, assertSameOrigin, isUniqueViolation, rateLimit } from "./http";
+import { HttpError, assertSameOrigin, isUniqueViolation, rateLimit, readJson } from "./http";
 import { hashPassword, verifyPassword } from "./passwords";
 
 const SESSION_COOKIE = "logistics_session";
@@ -34,6 +34,12 @@ let dummyHash: Promise<string> | undefined;
 function dummy(): Promise<string> {
   dummyHash ??= hashPassword("timing-only-not-a-credential");
   return dummyHash;
+}
+
+export function requestWithHeaders(incoming: { forEach(fn: (value: string, key: string) => void): void }): Request {
+  const headers = new Headers();
+  incoming.forEach((value, key) => headers.append(key, value));
+  return new Request("https://app.local/", { headers });
 }
 
 export function readCookie(request: Request, name: string): string | null {
@@ -90,35 +96,39 @@ export async function revokeMemberSessions(memberId: string): Promise<void> {
   await sql(`update sessions set revoked_at = now() where member_id = $1 and revoked_at is null`, [memberId]);
 }
 
-type GateIdentity = {
-  verified: boolean;
-  simulated?: boolean;
-  kind?: string;
-  email?: string;
-  emailVerified?: boolean;
-};
+export type SetupAccess = { open: true } | { open: false; reason: string };
 
-async function signedOwner(request: Request): Promise<boolean> {
-  const identity = (await getIdentity(request)) as GateIdentity;
-  if (!identity.verified || identity.simulated === true) return false;
-  if (identity.kind !== "person" || identity.emailVerified !== true) return false;
-  const email = typeof identity.email === "string" ? identity.email.trim().toLowerCase() : "";
-  return email === FIRST_ADMIN_EMAIL;
+function logSetupClosed(reason: string): void {
+  console.info("admin_setup_closed", reason === "hash_present" || reason === "no_admin_row" ? reason : "closed");
+}
+
+export async function setupAccess(request: Request): Promise<SetupAccess> {
+  const owner = await setupOwner(request);
+  if (!owner.ok) return { open: false, reason: owner.reason };
+  if (!owner.emailVerified) console.info("admin_setup_email_unverified");
+  const stage = await requestStage(request);
+  const rows = await sql<{ empty: boolean | string }>(
+    `select (coalesce(password_hash, '') = '') as empty
+     from members
+     where stage = $1 and username_norm = $2 and role = 'admin'
+     limit 1`,
+    [stage, ADMIN_USERNAME],
+  );
+  if (!rows[0]) {
+    logSetupClosed("no_admin_row");
+    return { open: false, reason: "no_admin_row" };
+  }
+  const empty = rows[0].empty === true || rows[0].empty === "t" || rows[0].empty === "true";
+  if (!empty) {
+    logSetupClosed("hash_present");
+    return { open: false, reason: "hash_present" };
+  }
+  return { open: true };
 }
 
 async function limitSetup(request: Request): Promise<void> {
   const allowed = await rateLimit(`setup:ip:${clientIp(request)}`, 20);
   if (!allowed) throw new HttpError(429, "rate", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.");
-}
-
-async function adminPasswordUnset(stage: Stage): Promise<boolean> {
-  const rows = await sql<{ id: string }>(
-    `select id from members
-     where stage = $1 and username_norm = $2 and role = 'admin' and coalesce(password_hash, '') = ''
-     limit 1`,
-    [stage, ADMIN_USERNAME],
-  );
-  return Boolean(rows[0]);
 }
 
 function setupCookie(token: string): string {
@@ -137,9 +147,10 @@ async function issueSetupChallenge(): Promise<{ token: string; csrf: string }> {
   return { token, csrf };
 }
 
-async function assertSetupCsrf(request: Request): Promise<void> {
+async function assertSetupCsrf(request: Request, fromForm = ""): Promise<void> {
   const token = readCookie(request, SETUP_COOKIE);
-  const given = request.headers.get("x-csrf-token") ?? "";
+  const header = request.headers.get("x-csrf-token") ?? "";
+  const given = header !== "" ? header : fromForm;
   if (!token || given === "") throw new HttpError(403, "csrf", "요청을 확인하지 못했습니다. 다시 열어 주세요.");
   const rows = await sql<{ csrf_token: string }>(
     `select csrf_token from setup_challenges
@@ -154,45 +165,106 @@ async function assertSetupCsrf(request: Request): Promise<void> {
   }
 }
 
+type SetupSubmission = { password: string; confirm: string; csrf: string; form: boolean };
+
+async function readSetupSubmission(request: Request): Promise<SetupSubmission> {
+  const type = request.headers.get("content-type") ?? "";
+  if (type.includes("application/x-www-form-urlencoded") || type.includes("multipart/form-data")) {
+    const data = await request.formData();
+    const field = (name: string) => {
+      const value = data.get(name);
+      return typeof value === "string" ? value : "";
+    };
+    return { password: field("password"), confirm: field("confirm"), csrf: field("csrf"), form: true };
+  }
+  const body = await readJson(request);
+  return {
+    password: typeof body.password === "string" ? body.password : "",
+    confirm: typeof body.confirm === "string" ? body.confirm : "",
+    csrf: "",
+    form: false,
+  };
+}
+
+function formRedirect(location: string): Response {
+  return new Response(null, {
+    status: 303,
+    headers: { location, "cache-control": "private, no-store" },
+  });
+}
+
+export async function setupEntry(request: Request): Promise<Response> {
+  const opened = await openSetupForm(request);
+  if (!opened.open) return formRedirect("/login?form=1");
+  const headers = new Headers({ location: "/setup", "cache-control": "private, no-store" });
+  headers.append("set-cookie", setupCookie(opened.token));
+  return new Response(null, { status: 303, headers });
+}
+
+export async function setupCsrf(request: Request): Promise<string | null> {
+  const token = readCookie(request, SETUP_COOKIE);
+  if (!token) return null;
+  const rows = await sql<{ csrf_token: string }>(
+    `select csrf_token from setup_challenges where token_hash = $1 and expires_at > now()`,
+    [tokenHash(token)],
+  );
+  return rows[0]?.csrf_token ?? null;
+}
+
+export async function openSetupForm(request: Request): Promise<{ open: true; csrf: string; token: string } | { open: false; reason: string }> {
+  await limitSetup(request);
+  const access = await setupAccess(request);
+  if (!access.open) return access;
+  const issued = await issueSetupChallenge();
+  return { open: true, csrf: issued.csrf, token: issued.token };
+}
+
 export async function adminSetupStatus(request: Request): Promise<Response> {
   await limitSetup(request);
-  if (!(await signedOwner(request))) {
-    return jsonResponse({ open: false, error: "forbidden", message: "이 단계를 사용할 수 없습니다." }, 403, new Headers());
+  const access = await setupAccess(request);
+  if (!access.open) {
+    const status = access.reason === "hash_present" || access.reason === "no_admin_row" ? 200 : 403;
+    return jsonResponse({ open: false }, status, new Headers());
   }
-  const stage = await requestStage(request);
-  if (!(await adminPasswordUnset(stage))) return jsonResponse({ open: false }, 200, new Headers());
   const issued = await issueSetupChallenge();
   const headers = new Headers();
   headers.append("set-cookie", setupCookie(issued.token));
   return jsonResponse({ open: true, csrfToken: issued.csrf }, 200, headers);
 }
 
-export async function adminSetupPassword(request: Request, body: Record<string, unknown>): Promise<Response> {
-  assertSameOrigin(request);
-  await limitSetup(request);
-  if (!(await signedOwner(request))) throw new HttpError(403, "forbidden", "이 단계를 사용할 수 없습니다.");
-  await assertSetupCsrf(request);
-  const password = typeof body.password === "string" ? body.password : "";
-  const confirm = typeof body.confirm === "string" ? body.confirm : "";
-  if (password !== confirm) throw new HttpError(400, "invalid", "비밀번호 확인이 일치하지 않습니다.");
-  assertPassword(password, ADMIN_USERNAME);
-  const hash = await hashPassword(password);
-  const stage = await requestStage(request);
-  const updated = await sql<{ id: string }>(
-    `update members
-     set password_hash = $3,
-         must_change_password = false,
-         password_version = password_version + 1,
-         updated_at = now()
-     where stage = $1
-       and username_norm = $2
-       and role = 'admin'
-       and coalesce(password_hash, '') = ''
-     returning id`,
-    [stage, ADMIN_USERNAME, hash],
-  );
-  if (!updated[0]) throw new HttpError(409, "conflict", "이미 설정된 비밀번호입니다.");
-  return jsonResponse({ ok: true }, 200, new Headers());
+export async function adminSetupPassword(request: Request): Promise<Response> {
+  const submission = await readSetupSubmission(request);
+  try {
+    assertSameOrigin(request);
+    await limitSetup(request);
+    const access = await setupAccess(request);
+    if (!access.open) throw new HttpError(403, "forbidden", "이 단계를 사용할 수 없습니다.");
+    await assertSetupCsrf(request, submission.csrf);
+    if (submission.password !== submission.confirm) throw new HttpError(400, "invalid", "비밀번호 확인이 일치하지 않습니다.");
+    assertPassword(submission.password, ADMIN_USERNAME);
+    const hash = await hashPassword(submission.password);
+    const stage = await requestStage(request);
+    const updated = await sql<{ id: string }>(
+      `update members
+       set password_hash = $3,
+           must_change_password = false,
+           password_version = password_version + 1,
+           updated_at = now()
+       where stage = $1
+         and username_norm = $2
+         and role = 'admin'
+         and coalesce(password_hash, '') = ''
+       returning id`,
+      [stage, ADMIN_USERNAME, hash],
+    );
+    if (!updated[0]) throw new HttpError(409, "conflict", "이미 설정된 비밀번호입니다.");
+    if (submission.form) return formRedirect("/login");
+    return jsonResponse({ ok: true }, 200, new Headers());
+  } catch (error) {
+    if (!submission.form) throw error;
+    const code = error instanceof HttpError ? error.code : "server";
+    return formRedirect(`/setup?error=${encodeURIComponent(code)}`);
+  }
 }
 
 export async function resolveSession(request: Request): Promise<SessionActor> {

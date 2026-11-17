@@ -153,6 +153,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const title = LINKS.find((item) => item[0] === pathname)?.[1]
     ?? (pathname.startsWith("/tasks/") ? "업무" : pathname.startsWith("/admin") ? "관리" : pathname.startsWith("/focus") ? "효율" : "물류자동화 업무");
 
+  if (pathname === "/setup") return <>{children}</>;
   if (phase === "loading") return <p className="state">불러오는 중…</p>;
   async function showLogin() {
     setSetupCsrf("");

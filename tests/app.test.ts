@@ -52,6 +52,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
       token?: string;
       now?: string;
       body?: unknown;
+      rawBody?: string;
       headers?: Record<string, string>;
       csrf?: boolean;
     } = {},
@@ -64,12 +65,14 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     }
     if (options.token) headers.set("x-cursor-app-token", options.token);
     if (options.now) headers.set("x-logistics-test-now", options.now);
-    if (options.body != null) headers.set("content-type", "application/json");
+    if (options.rawBody != null) {
+      if (!headers.has("content-type")) headers.set("content-type", "application/x-www-form-urlencoded");
+    } else if (options.body != null) headers.set("content-type", "application/json");
     const response = await handle(
       new Request(`http://127.0.0.1${pathname}`, {
         method,
         headers,
-        body: options.body != null ? JSON.stringify(options.body) : undefined,
+        body: options.rawBody != null ? options.rawBody : options.body != null ? JSON.stringify(options.body) : undefined,
       }),
     );
     const text = await response.text();
@@ -202,7 +205,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     if (address === null || typeof address === "string") throw new Error("issuer");
     process.env.CURSOR_APP_ID = "logistics-setup-test";
     process.env.CURSOR_APP_IDENTITY_ISSUER = `http://127.0.0.1:${address.port}`;
-    function signPerson(email: string): string {
+    function signPerson(email: string, emailVerified = true): string {
       const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: "setup-test" })).toString("base64url");
       const now = Math.floor(Date.now() / 1000);
       const payload = Buffer.from(JSON.stringify({
@@ -212,7 +215,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
         iat: now,
         exp: now + 300,
         email,
-        email_verified: true,
+        email_verified: emailVerified,
         name: "Signed",
         idp: { provider: "cursor", sub: "42" },
         kind: "person",
@@ -225,6 +228,27 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     }
     const ownerToken = signPerson(admin.email);
     const otherToken = signPerson("other@example.com");
+    const { setupAccess } = await import("../src/lib/auth.ts");
+    const setupLogs: string[] = [];
+    const previousInfo = console.info;
+    console.info = (...args: unknown[]) => {
+      setupLogs.push(args.map((item) => String(item)).join(" "));
+    };
+    try {
+      const missing = await setupAccess(new Request("http://127.0.0.1/setup"));
+      assert.equal(missing.open, false);
+      if (!missing.open) assert.equal(missing.reason, "missing_header");
+      const mismatchedIdentity = await setupAccess(new Request("http://127.0.0.1/setup", {
+        headers: { "x-cursor-identity-v2": otherToken },
+      }));
+      assert.equal(mismatchedIdentity.open, false);
+      if (!mismatchedIdentity.open) assert.equal(mismatchedIdentity.reason, "email_mismatch");
+      assert.equal(setupLogs.some((line) => line.includes("admin_setup_closed missing_header")), true);
+      assert.equal(setupLogs.some((line) => line.includes("admin_setup_closed email_mismatch")), true);
+      assert.equal(setupLogs.some((line) => line.includes(admin.email) || line.includes(otherToken)), false);
+    } finally {
+      console.info = previousInfo;
+    }
     const unsigned = await call("GET", "/api/auth/admin-setup");
     assert.equal(unsigned.status, 403);
     assert.equal(unsigned.data.open, false);
@@ -234,6 +258,19 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     const otherView = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": otherToken } });
     assert.equal(otherView.status, 403);
     assert.equal(otherView.data.open, false);
+    const unverified = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": signPerson(admin.email, false) } });
+    assert.equal(unverified.status, 200, JSON.stringify(unverified.data));
+    assert.equal(unverified.data.open, true);
+    const cased = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": signPerson("Oops11311@Gmail.com") } });
+    assert.equal(cased.status, 200, JSON.stringify(cased.data));
+    assert.equal(cased.data.open, true);
+    const entryDenied = await call("GET", "/api/auth/setup-entry");
+    assert.equal(entryDenied.status, 303);
+    assert.equal(entryDenied.headers.get("location"), "/login?form=1");
+    const entry = await call("GET", "/api/auth/setup-entry", { headers: { "x-cursor-identity-v2": ownerToken } });
+    assert.equal(entry.status, 303);
+    assert.equal(entry.headers.get("location"), "/setup");
+    assert.equal(entry.headers.getSetCookie().some((item) => item.startsWith("logistics_setup=") && item.includes("HttpOnly")), true);
     const opened = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": ownerToken } });
     assert.equal(opened.status, 200, JSON.stringify(opened.data));
     assert.equal(opened.data.open, true);
@@ -263,6 +300,18 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     const mismatched = generated();
     assert.equal((await setupPost(ownerToken, { password: mismatched, confirm: generated() })).status, 400);
     assert.equal((await setupPost(ownerToken, { password: "short", confirm: "short" })).status, 400);
+    const formDenied = await call("POST", "/api/auth/admin-setup", {
+      rawBody: new URLSearchParams({ password: generated(), confirm: generated(), csrf: opened.data.csrfToken }).toString(),
+      headers: { cookie: setupCookie },
+    });
+    assert.equal(formDenied.status, 303);
+    assert.equal(formDenied.headers.get("location"), "/setup?error=forbidden");
+    const formMismatch = await call("POST", "/api/auth/admin-setup", {
+      rawBody: new URLSearchParams({ password: generated(), confirm: generated(), csrf: opened.data.csrfToken }).toString(),
+      headers: { cookie: setupCookie, "x-cursor-identity-v2": ownerToken },
+    });
+    assert.equal(formMismatch.status, 303);
+    assert.equal(formMismatch.headers.get("location"), "/setup?error=invalid");
     const stillEmpty = await sql<{ password_hash: string | null }>(`select password_hash from members where id = $1`, [adminId]);
     assert.equal(stillEmpty[0].password_hash, null);
     const chosen = generated();
@@ -284,8 +333,9 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     const closed = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": ownerToken } });
     assert.equal(closed.status, 200);
     assert.equal(closed.data.open, false);
+    await sql(`delete from rate_limits where actor_key like 'setup:%'`);
     const repeatSetup = generated();
-    assert.equal((await setupPost(ownerToken, { password: repeatSetup, confirm: repeatSetup })).status, 409);
+    assert.equal((await setupPost(ownerToken, { password: repeatSetup, confirm: repeatSetup })).status, 403);
     delete process.env.CURSOR_APP_ID;
     delete process.env.CURSOR_APP_IDENTITY_ISSUER;
     identityServer.close();

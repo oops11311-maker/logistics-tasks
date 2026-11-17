@@ -1,12 +1,23 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { setupOwner } from "./src/lib/setup-gate";
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  if (pathname === "/login" && request.nextUrl.searchParams.get("form") !== "1") {
+    const owner = await setupOwner(request);
+    if (owner.ok) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/setup";
+      url.search = "";
+      return NextResponse.redirect(url);
+    }
+  }
   if (
     pathname.startsWith("/api")
     || pathname.startsWith("/_next")
     || pathname.startsWith("/icons")
     || pathname === "/login"
+    || pathname === "/setup"
     || pathname === "/sw.js"
     || pathname === "/manifest.webmanifest"
     || pathname === "/favicon.ico"

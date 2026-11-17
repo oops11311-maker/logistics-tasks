@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { FIRST_ADMIN_EMAIL, requestStage, type Actor, type Role, type Stage } from "./access";
+import { FIRST_ADMIN_EMAIL, assertUsername, normalizeUsername, requestStage, type Actor, type Role, type Stage } from "./access";
 import { sql } from "./db";
 import { id } from "./format";
 import { HttpError, isUniqueViolation, rateLimit } from "./http";
@@ -62,22 +62,12 @@ function clearCookie(): string {
   return `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`;
 }
 
-export function normalizeUsername(value: string): string {
-  return value.trim().toLowerCase().normalize("NFKC");
-}
-
 function assertPassword(password: string, username: string): void {
   if (password.length < 10 || password.length > 200) {
     throw new HttpError(400, "invalid", "비밀번호는 10자 이상 200자 이하여야 합니다.");
   }
   if (password.toLowerCase() === username.toLowerCase()) {
     throw new HttpError(400, "invalid", "비밀번호는 사용자 이름과 달라야 합니다.");
-  }
-}
-
-function assertUsername(username: string): void {
-  if (!USERNAME.test(username)) {
-    throw new HttpError(400, "invalid", "사용자 이름은 3–80자의 영문, 숫자, 점, @, 밑줄, 하이픈만 가능합니다.");
   }
 }
 

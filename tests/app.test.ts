@@ -36,6 +36,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
   const outsider = { sub: "user:out", email: "out@example.com", name: "외부인", kind: "person" };
   const automation = { sub: "key:auto", email: "", name: "automation", kind: "key" };
   const sessions = new Map<string, { cookie: string; csrf: string }>();
+  const latestPassword = new Map<string, string>();
 
   function generated() {
     return randomBytes(18).toString("base64url");
@@ -102,6 +103,9 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
       });
       assert.equal(changed.status, 200, JSON.stringify(changed.data));
       remember(actor.email, changed);
+      latestPassword.set(actor.email, next);
+    } else {
+      latestPassword.set(actor.email, password);
     }
   }
 
@@ -170,15 +174,22 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal(applied.applied, true);
     delete process.env.INITIAL_ADMIN_PASSWORD;
     assert.equal((await applyInitialAdminPassword()).applied, false);
+    const usernameMigration = await readFile(path.join(process.cwd(), "migrations/005_admin_username.sql"), "utf8");
+    for (const statement of usernameMigration.split(";").map((part) => part.trim()).filter(Boolean)) {
+      await sql(statement);
+      await sql(statement);
+    }
     const stored = await sql<{ password_hash: string; username_norm: string }>(
       `select password_hash, username_norm from members where id = $1`,
       [adminId],
     );
     assert.match(stored[0].password_hash, /^scrypt\$/);
     assert.equal(stored[0].password_hash.includes(initial), false);
+    assert.equal(stored[0].username_norm, "limjaeyeol");
     const keptBefore = await call("GET", `/api/tasks/${keptId}`);
     assert.equal(keptBefore.status, 401);
-    const first = await call("POST", "/api/auth/login", { body: { username: stored[0].username_norm, password: initial } });
+    assert.equal((await call("POST", "/api/auth/login", { body: { username: admin.email, password: initial } })).status, 401);
+    const first = await call("POST", "/api/auth/login", { body: { username: "limjaeyeol", password: initial } });
     assert.equal(first.status, 200, JSON.stringify(first.data));
     assert.equal(first.data.mustChangePassword, true);
     remember(admin.email, first);
@@ -192,7 +203,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     });
     assert.equal(missingCsrf.status, 403);
     const previousCookie = sessions.get(admin.email)?.cookie ?? "";
-    await loginActor(admin, stored[0].username_norm, initial);
+    await loginActor(admin, "limjaeyeol", initial);
     const invalidated = await call("GET", "/api/bootstrap", { headers: { cookie: previousCookie } });
     assert.equal(invalidated.status, 401);
     const kept = await call("GET", `/api/tasks/${keptId}`, { actor: admin });
@@ -221,6 +232,25 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     const junoBoot = await call("GET", "/api/bootstrap", { actor: juno });
     assert.equal(minaBoot.data.me.role, "member");
     assert.equal(junoBoot.data.me.role, "member");
+    const minaCookie = sessions.get(mina.email)?.cookie ?? "";
+    const renamedMina = await call("PATCH", `/api/admin/members/${minaBoot.data.me.id}`, {
+      actor: admin,
+      body: { username: "Mina.Kim" },
+    });
+    assert.equal(renamedMina.status, 200, JSON.stringify(renamedMina.data));
+    const minaState = await call("GET", "/api/admin/state", { actor: admin });
+    assert.equal(minaState.data.members.find((item: { id: string }) => item.id === minaBoot.data.me.id).username, "mina.kim");
+    assert.equal((await call("GET", "/api/bootstrap", { headers: { cookie: minaCookie } })).status, 200);
+    assert.equal((await call("POST", "/api/auth/login", { body: { username: "mina", password: latestPassword.get(mina.email) } })).status, 401);
+    assert.equal((await call("POST", "/api/auth/login", { body: { username: "mina.kim", password: latestPassword.get(mina.email) } })).status, 200);
+    assert.equal((await call("PATCH", `/api/admin/members/${junoBoot.data.me.id}`, {
+      actor: admin,
+      body: { username: "mina.kim" },
+    })).status, 409);
+    assert.equal((await call("PATCH", `/api/admin/members/${junoBoot.data.me.id}`, {
+      actor: mina,
+      body: { username: "juno-renamed" },
+    })).status, 403);
     assert.equal((await call("POST", "/api/admin/accounts", {
       actor: mina,
       body: { username: "new-person", name: "새 사람", role: "manager", password: generated() },
@@ -531,13 +561,13 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal((await call("PATCH", `/api/admin/members/${dropBoot.data.me.id}`, { actor: admin, body: { active: false } })).status, 200);
     assert.equal((await call("GET", "/api/bootstrap", { headers: { cookie: dropCookie } })).status, 401);
     const resetPassword = generated();
-    const minaCookie = sessions.get(mina.email)?.cookie ?? "";
+    const minaCookieBeforeReset = sessions.get(mina.email)?.cookie ?? "";
     assert.equal((await call("POST", `/api/admin/accounts/${minaBoot.data.me.id}/password`, { actor: mina, body: { password: resetPassword } })).status, 403);
     assert.equal((await call("POST", `/api/admin/accounts/${minaBoot.data.me.id}/password`, { token: "bot-test-token", body: { password: resetPassword } })).status, 403);
     const resetResult = await call("POST", `/api/admin/accounts/${minaBoot.data.me.id}/password`, { actor: admin, body: { password: resetPassword } });
     assert.equal(resetResult.status, 200, JSON.stringify(resetResult.data));
-    assert.equal((await call("GET", "/api/bootstrap", { headers: { cookie: minaCookie } })).status, 401);
-    await loginActor(mina, "mina", resetPassword);
+    assert.equal((await call("GET", "/api/bootstrap", { headers: { cookie: minaCookieBeforeReset } })).status, 401);
+    await loginActor(mina, "mina.kim", resetPassword);
     const loggedOut = sessions.get(juno.email)?.cookie ?? "";
     assert.equal((await call("POST", "/api/auth/logout", { actor: juno, body: {} })).status, 200);
     assert.equal((await call("GET", "/api/bootstrap", { headers: { cookie: loggedOut } })).status, 401);

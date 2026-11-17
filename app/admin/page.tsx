@@ -37,6 +37,7 @@ type MemberRow = { id: string; name: string; email: string; username: string | n
 function memberDiffs(before: MemberRow, after: MemberRow) {
   const rows: { label: string; from: string; to: string }[] = [];
   if (before.name !== after.name) rows.push({ label: "이름", from: before.name, to: after.name });
+  if ((before.username ?? "") !== (after.username ?? "")) rows.push({ label: "사용자 이름", from: before.username || "—", to: after.username || "—" });
   if (before.email !== after.email) rows.push({ label: "이메일", from: before.email, to: after.email });
   if (before.role !== after.role) rows.push({ label: "역할", from: roleLabel(before.role), to: roleLabel(after.role) });
   if (before.active !== after.active) rows.push({ label: "상태", from: before.active ? "사용 중" : "비활성", to: after.active ? "사용 중" : "비활성" });
@@ -134,6 +135,7 @@ export default function AdminPage() {
     if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
     const body: Record<string, unknown> = {};
     if (editing.name !== draft.name) body.name = draft.name;
+    if ((editing.username ?? "") !== (draft.username ?? "")) body.username = draft.username ?? "";
     if (editing.email !== draft.email) body.email = draft.email;
     if (editing.role !== draft.role) body.role = draft.role;
     if (editing.active !== draft.active) body.active = draft.active;
@@ -195,7 +197,7 @@ export default function AdminPage() {
             </tbody>
           </table>
         </div>
-        <p className="hint">계정에 있는 항목은 이름, 이메일, 역할, 사용 여부입니다. 소속 팀 칸은 없습니다.</p>
+        <p className="hint">계정에 있는 항목은 이름, 사용자 이름, 이메일, 역할, 사용 여부입니다. 소속 팀 칸은 없습니다. 사용자 이름을 바꿔도 이미 로그인된 세션은 유지되고, 다음 로그인은 새 이름으로 합니다.</p>
         {editing && draft ? (
           <div className="scrim" role="presentation">
             <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="member-edit-title">
@@ -208,6 +210,7 @@ export default function AdminPage() {
                     ))}
                   </ul>
                   {editing.email !== draft.email ? <p className="hint">이메일은 연락용입니다. 로그인은 사용자 이름으로 합니다.</p> : null}
+                  {(editing.username ?? "") !== (draft.username ?? "") ? <p className="hint">사용자 이름을 바꿔도 지금 세션은 끊기지 않습니다.</p> : null}
                   <div className="row">
                     <button className="btn" type="button" onClick={() => setConfirming(false)}>뒤로</button>
                     <button className="btn primary mutate" type="button" disabled={!online} onClick={() => void saveMember()}>저장</button>
@@ -223,7 +226,7 @@ export default function AdminPage() {
                     <input className="field" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required />
                   </label>
                   <label className="stack">사용자 이름
-                    <input className="field" value={draft.username ?? ""} disabled />
+                    <input className="field" aria-label="계정 사용자 이름" autoComplete="off" value={draft.username ?? ""} onChange={(event) => setDraft({ ...draft, username: event.target.value })} required />
                   </label>
                   <label className="stack">이메일
                     <input className="field" type="email" value={draft.email} disabled={editing.id === me.id} onChange={(event) => setDraft({ ...draft, email: event.target.value })} />

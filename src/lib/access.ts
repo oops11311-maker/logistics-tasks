@@ -27,6 +27,17 @@ type MemberRow = {
 
 const HUMAN_ROLES = new Set(["admin", "manager", "member", "viewer"]);
 export const FIRST_ADMIN_EMAIL = "oops11311@gmail.com";
+const USERNAME = /^[a-z0-9._@-]{3,80}$/;
+
+export function normalizeUsername(value: string): string {
+  return value.trim().toLowerCase().normalize("NFKC");
+}
+
+export function assertUsername(username: string): void {
+  if (!USERNAME.test(username)) {
+    throw new HttpError(400, "invalid", "사용자 이름은 3–80자의 영문, 숫자, 점, @, 밑줄, 하이픈만 가능합니다.");
+  }
+}
 
 export type BotSettings = {
   summaryTime: string;
@@ -331,14 +342,27 @@ export async function updateMember(actor: Actor, memberId: string, body: Record<
   if (!isId(memberId)) throw new HttpError(400, "invalid", "멤버를 찾지 못했습니다.");
   await withTransaction(async (query) => {
     await query(`select pg_advisory_xact_lock($1)`, [actor.stage === "preview" ? 727274112 : 727274111]);
-    const rows = await query<MemberRow>(
-      `select id, stage, subject, email, email_norm, name, role, active
+    const rows = await query<MemberRow & { username_norm: string | null }>(
+      `select id, stage, subject, email, email_norm, name, role, active, username_norm
        from members where id = $1 and stage = $2`,
       [memberId, actor.stage],
     );
     const member = rows[0];
     if (!member || member.role === "bot") throw new HttpError(404, "not_found", "멤버를 찾지 못했습니다.");
     const name = typeof body.name === "string" ? body.name.trim() : member.name;
+    let usernameNorm = member.username_norm ?? "";
+    if (typeof body.username === "string") {
+      const next = normalizeUsername(body.username);
+      assertUsername(next);
+      if (next !== usernameNorm) {
+        const taken = await query<{ id: string }>(
+          `select id from members where stage = $1 and username_norm = $2 and id <> $3`,
+          [actor.stage, next, member.id],
+        );
+        if (taken[0]) throw new HttpError(409, "conflict", "이미 쓰는 사용자 이름입니다.");
+        usernameNorm = next;
+      }
+    }
     const email = typeof body.email === "string" ? body.email.trim() : member.email;
     const role = typeof body.role === "string" ? body.role : member.role;
     const active = typeof body.active === "boolean" ? body.active : member.active;
@@ -371,10 +395,12 @@ export async function updateMember(actor: Actor, memberId: string, body: Record<
     await query(
       `update members
        set name = $3, email = $4, email_norm = $5, role = $6, active = $7,
+           username = case when $8 = '' then username else $8 end,
+           username_norm = case when $8 = '' then username_norm else $8 end,
            deactivated_at = case when $7 then null else coalesce(deactivated_at, now()) end,
            updated_at = now()
        where id = $1 and stage = $2`,
-      [member.id, actor.stage, name, email, email.toLowerCase(), role, active],
+      [member.id, actor.stage, name, email, email.toLowerCase(), role, active, usernameNorm],
     );
     if (!active) {
       await query(`update sessions set revoked_at = now() where member_id = $1 and revoked_at is null`, [member.id]);

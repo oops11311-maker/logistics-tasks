@@ -352,6 +352,14 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal(restored.data.restored, true);
     assert.equal((await call("DELETE", `/api/categories/${made.data.id}`, { actor: mina })).status, 403);
     assert.equal((await call("DELETE", `/api/categories/${made.data.id}`, { token: "bot-test-token" })).status, 403);
+    const manager = { sub: "user:manager-a", email: "manager@example.com", name: "매니저", kind: "person" };
+    assert.equal((await call("POST", "/api/admin/invites", { actor: admin, body: { email: "manager@example.com", role: "manager" } })).status, 201);
+    const managerBoot = await call("GET", "/api/bootstrap", { actor: manager });
+    assert.equal(managerBoot.status, 200, JSON.stringify(managerBoot.data));
+    assert.equal(managerBoot.data.me.role, "manager");
+    assert.equal((await call("POST", "/api/categories", { actor: manager, body: { name: "매니저 게시판" } })).status, 403);
+    assert.equal((await call("DELETE", `/api/categories/${made.data.id}`, { actor: manager })).status, 403);
+    assert.equal((await call("PATCH", `/api/categories/${made.data.id}`, { actor: manager, body: { archived: true } })).status, 403);
 
     const renamed = await call("PATCH", `/api/admin/members/${minaBoot.data.me.id}`, {
       actor: admin,

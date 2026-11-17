@@ -569,7 +569,7 @@ export async function listCategories(stage: string, includeArchived: boolean) {
 }
 
 export async function createCategory(actor: Actor, body: Record<string, unknown>) {
-  assertProjectManager(actor);
+  assertAdmin(actor);
   const name = typeof body.name === "string" ? body.name.trim() : "";
   if (name.length < 1 || name.length > 40) throw new HttpError(400, "invalid", "프로젝트 이름을 확인하세요.");
   const sort = await sql<{ n: number }>(
@@ -598,7 +598,7 @@ export async function createCategory(actor: Actor, body: Record<string, unknown>
 }
 
 export async function archiveCategory(actor: Actor, categoryId: string) {
-  assertProjectManager(actor);
+  assertAdmin(actor);
   if (!isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 찾지 못했습니다.");
   const rows = await sql<{ id: string }>(
     `select id from categories where id = $1 and stage = $2`,
@@ -614,10 +614,11 @@ export async function archiveCategory(actor: Actor, categoryId: string) {
 }
 
 export async function updateCategory(actor: Actor, categoryId: string, body: Record<string, unknown>) {
-  assertProjectManager(actor);
+  const archived = typeof body.archived === "boolean" ? body.archived : undefined;
+  if (archived === true) assertAdmin(actor);
+  else assertProjectManager(actor);
   if (!isId(categoryId)) throw new HttpError(400, "invalid", "프로젝트를 찾지 못했습니다.");
   const name = typeof body.name === "string" ? body.name.trim() : undefined;
-  const archived = typeof body.archived === "boolean" ? body.archived : undefined;
   if (name != null && (name.length < 1 || name.length > 40)) {
     throw new HttpError(400, "invalid", "프로젝트 이름을 확인하세요.");
   }

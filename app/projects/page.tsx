@@ -26,7 +26,7 @@ export default function ProjectsPage() {
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState("");
   const [pending, setPending] = useState<Project | null>(null);
-  const manage = me.role === "admin" || me.role === "manager";
+  const manage = me.role === "admin";
 
   function load() {
     setLoading(true);

@@ -91,7 +91,8 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.ok(cookie, "session cookie");
     assert.equal(line?.includes("HttpOnly"), true);
     assert.equal(line?.includes("Secure"), true);
-    assert.equal(/SameSite=Lax/i.test(line ?? ""), true);
+    assert.match(line ?? "", /SameSite=None/i);
+    assert.match(line ?? "", /Partitioned/i);
     assert.equal(typeof response.data.csrfToken, "string");
     sessions.set(email, { cookie: cookie ?? "", csrf: response.data.csrfToken });
   }
@@ -270,29 +271,57 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     const entry = await call("GET", "/api/auth/setup-entry", { headers: { "x-cursor-identity-v2": ownerToken } });
     assert.equal(entry.status, 303);
     assert.equal(entry.headers.get("location"), "/setup");
-    assert.equal(entry.headers.getSetCookie().some((item) => item.startsWith("logistics_setup=") && item.includes("HttpOnly")), true);
     const opened = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": ownerToken } });
-    assert.equal(opened.status, 200, JSON.stringify(opened.data));
+    assert.equal(opened.status, 200, JSON.stringify({ open: opened.data.open }));
     assert.equal(opened.data.open, true);
     assert.equal(typeof opened.data.csrfToken, "string");
-    const setupLine = opened.headers.getSetCookie().find((item) => item.startsWith("logistics_setup="));
-    assert.ok(setupLine);
-    assert.equal(setupLine?.includes("HttpOnly"), true);
-    assert.equal(setupLine?.includes("Secure"), true);
-    assert.match(setupLine ?? "", /SameSite=Lax/i);
-    const setupCookie = setupLine?.split(";")[0] ?? "";
-    async function setupPost(token: string | undefined, body: unknown, csrf = true) {
+    assert.equal(opened.headers.getSetCookie().some((item) => item.startsWith("logistics_setup=")), false);
+    const { issueFormProof } = await import("../src/lib/form-proof.ts");
+    const proof = opened.data.csrfToken as string;
+    async function setupPost(token: string | undefined, body: unknown, csrf: string | false = proof) {
       const headers: Record<string, string> = {};
       if (token) headers["x-cursor-identity-v2"] = token;
-      if (setupCookie) headers.cookie = setupCookie;
-      if (csrf) headers["x-csrf-token"] = opened.data.csrfToken;
+      if (csrf !== false) headers["x-csrf-token"] = csrf;
       return call("POST", "/api/auth/admin-setup", { headers, body });
     }
+    await sql(`delete from rate_limits where actor_key like 'setup:%'`);
+    const expiredProof = await issueFormProof("setup", Math.floor(Date.now() / 1000) - 30);
+    const loginProof = await issueFormProof("login");
+    const alteredProof = `${proof.slice(0, -1)}${proof.endsWith("a") ? "b" : "a"}`;
+    assert.equal((await setupPost(ownerToken, { password: generated(), confirm: generated() }, expiredProof)).status, 403);
+    assert.equal((await setupPost(ownerToken, { password: generated(), confirm: generated() }, alteredProof)).status, 403);
+    assert.equal((await setupPost(ownerToken, { password: generated(), confirm: generated() }, loginProof)).status, 403);
+    const framed = await call("POST", "/api/auth/admin-setup", {
+      rawBody: new URLSearchParams({
+        password: generated(),
+        confirm: generated(),
+        csrf: proof,
+      }).toString(),
+      headers: { "x-cursor-identity-v2": ownerToken },
+    });
+    assert.equal(framed.status, 303);
+    assert.equal(framed.headers.get("location"), "/setup?error=invalid");
+    const framedMissing = await call("POST", "/api/auth/admin-setup", {
+      rawBody: new URLSearchParams({ password: generated(), confirm: generated() }).toString(),
+      headers: { "x-cursor-identity-v2": ownerToken },
+    });
+    assert.equal(framedMissing.status, 303);
+    assert.equal(framedMissing.headers.get("location"), "/setup?error=csrf");
+    const framedExpired = await call("POST", "/api/auth/admin-setup", {
+      rawBody: new URLSearchParams({
+        password: generated(),
+        confirm: generated(),
+        csrf: expiredProof,
+      }).toString(),
+      headers: { "x-cursor-identity-v2": ownerToken },
+    });
+    assert.equal(framedExpired.status, 303);
+    assert.equal(framedExpired.headers.get("location"), "/setup?error=csrf");
     assert.equal((await call("POST", "/api/auth/admin-setup", { body: { password: generated(), confirm: generated() } })).status, 403);
     assert.equal((await setupPost(otherToken, { password: generated(), confirm: generated() })).status, 403);
     assert.equal((await setupPost("forged.not-a.token", { password: generated(), confirm: generated() })).status, 403);
     const plainHeader = await call("POST", "/api/auth/admin-setup", {
-      headers: { "x-cursor-identity": admin.email, cookie: setupCookie, "x-csrf-token": opened.data.csrfToken },
+      headers: { "x-cursor-identity": admin.email, "x-csrf-token": proof },
       body: { password: generated(), confirm: generated() },
     });
     assert.equal(plainHeader.status, 403);
@@ -301,14 +330,13 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal((await setupPost(ownerToken, { password: mismatched, confirm: generated() })).status, 400);
     assert.equal((await setupPost(ownerToken, { password: "short", confirm: "short" })).status, 400);
     const formDenied = await call("POST", "/api/auth/admin-setup", {
-      rawBody: new URLSearchParams({ password: generated(), confirm: generated(), csrf: opened.data.csrfToken }).toString(),
-      headers: { cookie: setupCookie },
+      rawBody: new URLSearchParams({ password: generated(), confirm: generated(), csrf: proof }).toString(),
     });
     assert.equal(formDenied.status, 303);
     assert.equal(formDenied.headers.get("location"), "/setup?error=forbidden");
     const formMismatch = await call("POST", "/api/auth/admin-setup", {
-      rawBody: new URLSearchParams({ password: generated(), confirm: generated(), csrf: opened.data.csrfToken }).toString(),
-      headers: { cookie: setupCookie, "x-cursor-identity-v2": ownerToken },
+      rawBody: new URLSearchParams({ password: generated(), confirm: generated(), csrf: proof }).toString(),
+      headers: { "x-cursor-identity-v2": ownerToken },
     });
     assert.equal(formMismatch.status, 303);
     assert.equal(formMismatch.headers.get("location"), "/setup?error=invalid");

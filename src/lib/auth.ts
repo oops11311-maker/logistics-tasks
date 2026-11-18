@@ -1,15 +1,15 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { assertUsername, normalizeUsername, requestStage, type Actor, type Role, type Stage } from "./access";
-import { setupOwner } from "./setup-gate";
 import { sql } from "./db";
 import { id } from "./format";
+import { assertFormProof, issueFormProof } from "./form-proof";
 import { HttpError, assertSameOrigin, isUniqueViolation, rateLimit, readJson } from "./http";
 import { hashPassword, verifyPassword } from "./passwords";
+import { setupOwner } from "./setup-gate";
 
 const SESSION_COOKIE = "logistics_session";
-const SETUP_COOKIE = "logistics_setup";
+const COOKIE_FLAGS = "HttpOnly; Secure; SameSite=None; Partitioned; Path=/";
 const SESSION_SECONDS = 60 * 60 * 12;
-const SETUP_SECONDS = 60 * 10;
 const ADMIN_USERNAME = "limjaeyeol";
 const USERNAME = /^[a-z0-9._@-]{3,80}$/;
 const HUMAN_ROLES = new Set(["admin", "manager", "member", "viewer"]);
@@ -65,11 +65,11 @@ function tokenHash(token: string): string {
 }
 
 function sessionCookie(token: string): string {
-  return `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${SESSION_SECONDS}`;
+  return `${SESSION_COOKIE}=${token}; ${COOKIE_FLAGS}; Max-Age=${SESSION_SECONDS}`;
 }
 
 function clearCookie(): string {
-  return `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`;
+  return `${SESSION_COOKIE}=; ${COOKIE_FLAGS}; Max-Age=0`;
 }
 
 function assertPassword(password: string, username: string): void {
@@ -131,38 +131,10 @@ async function limitSetup(request: Request): Promise<void> {
   if (!allowed) throw new HttpError(429, "rate", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.");
 }
 
-function setupCookie(token: string): string {
-  return `${SETUP_COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${SETUP_SECONDS}`;
-}
-
-async function issueSetupChallenge(): Promise<{ token: string; csrf: string }> {
-  const token = randomBytes(32).toString("base64url");
-  const csrf = randomBytes(32).toString("base64url");
-  await sql(`delete from setup_challenges where expires_at < now()`);
-  await sql(
-    `insert into setup_challenges (id, token_hash, csrf_token, expires_at)
-     values ($1, $2, $3, now() + interval '10 minutes')`,
-    [id(), tokenHash(token), csrf],
-  );
-  return { token, csrf };
-}
-
-async function assertSetupCsrf(request: Request, fromForm = ""): Promise<void> {
-  const token = readCookie(request, SETUP_COOKIE);
+async function assertSetupProof(request: Request, fromForm = ""): Promise<void> {
   const header = request.headers.get("x-csrf-token") ?? "";
   const given = header !== "" ? header : fromForm;
-  if (!token || given === "") throw new HttpError(403, "csrf", "요청을 확인하지 못했습니다. 다시 열어 주세요.");
-  const rows = await sql<{ csrf_token: string }>(
-    `select csrf_token from setup_challenges
-     where token_hash = $1 and expires_at > now()`,
-    [tokenHash(token)],
-  );
-  const expected = rows[0]?.csrf_token ?? "";
-  const a = Buffer.from(given);
-  const b = Buffer.from(expected);
-  if (expected === "" || a.length !== b.length || !timingSafeEqual(a, b)) {
-    throw new HttpError(403, "csrf", "요청을 확인하지 못했습니다. 다시 열어 주세요.");
-  }
+  await assertFormProof(given, "setup");
 }
 
 type SetupSubmission = { password: string; confirm: string; csrf: string; form: boolean };
@@ -194,29 +166,9 @@ function formRedirect(location: string): Response {
 }
 
 export async function setupEntry(request: Request): Promise<Response> {
-  const opened = await openSetupForm(request);
-  if (!opened.open) return formRedirect("/login?form=1");
-  const headers = new Headers({ location: "/setup", "cache-control": "private, no-store" });
-  headers.append("set-cookie", setupCookie(opened.token));
-  return new Response(null, { status: 303, headers });
-}
-
-export async function setupCsrf(request: Request): Promise<string | null> {
-  const token = readCookie(request, SETUP_COOKIE);
-  if (!token) return null;
-  const rows = await sql<{ csrf_token: string }>(
-    `select csrf_token from setup_challenges where token_hash = $1 and expires_at > now()`,
-    [tokenHash(token)],
-  );
-  return rows[0]?.csrf_token ?? null;
-}
-
-export async function openSetupForm(request: Request): Promise<{ open: true; csrf: string; token: string } | { open: false; reason: string }> {
-  await limitSetup(request);
   const access = await setupAccess(request);
-  if (!access.open) return access;
-  const issued = await issueSetupChallenge();
-  return { open: true, csrf: issued.csrf, token: issued.token };
+  if (!access.open) return formRedirect("/login?form=1");
+  return formRedirect("/setup");
 }
 
 export async function adminSetupStatus(request: Request): Promise<Response> {
@@ -226,10 +178,7 @@ export async function adminSetupStatus(request: Request): Promise<Response> {
     const status = access.reason === "hash_present" || access.reason === "no_admin_row" ? 200 : 403;
     return jsonResponse({ open: false }, status, new Headers());
   }
-  const issued = await issueSetupChallenge();
-  const headers = new Headers();
-  headers.append("set-cookie", setupCookie(issued.token));
-  return jsonResponse({ open: true, csrfToken: issued.csrf }, 200, headers);
+  return jsonResponse({ open: true, csrfToken: await issueFormProof("setup") }, 200, new Headers());
 }
 
 export async function adminSetupPassword(request: Request): Promise<Response> {
@@ -239,7 +188,7 @@ export async function adminSetupPassword(request: Request): Promise<Response> {
     await limitSetup(request);
     const access = await setupAccess(request);
     if (!access.open) throw new HttpError(403, "forbidden", "이 단계를 사용할 수 없습니다.");
-    await assertSetupCsrf(request, submission.csrf);
+    await assertSetupProof(request, submission.csrf);
     if (submission.password !== submission.confirm) throw new HttpError(400, "invalid", "비밀번호 확인이 일치하지 않습니다.");
     assertPassword(submission.password, ADMIN_USERNAME);
     const hash = await hashPassword(submission.password);

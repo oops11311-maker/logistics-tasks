@@ -1,6 +1,6 @@
 import { headers } from "next/headers";
-import { redirect } from "next/navigation";
-import { requestWithHeaders, setupAccess, setupCsrf } from "@/src/lib/auth";
+import { requestWithHeaders, setupAccess } from "@/src/lib/auth";
+import { issueFormProof } from "@/src/lib/form-proof";
 
 const ERRORS: Record<string, string> = {
   csrf: "요청을 확인하지 못했습니다. 다시 열어 주세요.",
@@ -17,8 +17,7 @@ export default async function SetupPage({ searchParams }: { searchParams: Promis
   const request = requestWithHeaders(await headers());
   const access = await setupAccess(request);
   if (access.open) {
-    const csrf = await setupCsrf(request);
-    if (!csrf) redirect("/api/auth/setup-entry");
+    const csrf = await issueFormProof("setup");
     return (
       <main className="login-wrap">
         <form className="login-card" method="POST" action="/api/auth/admin-setup">

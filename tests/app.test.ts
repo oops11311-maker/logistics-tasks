@@ -187,6 +187,43 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal(trusted.status, 401);
     delete process.env.VERCEL;
     await sql(`delete from rate_limits where actor_key like 'login:%'`);
+    const { rateLimit, RATE_LIMIT_ROW_CAP } = await import("../src/lib/http.ts");
+    const staleAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    for (let n = 0; n < 30; n += 1) {
+      await sql(
+        `insert into rate_limits (actor_key, window_start, count) values ($1, $2, 1)`,
+        [`login:user:old-${n}`, staleAt],
+      );
+    }
+    await sql(
+      `insert into rate_limits (actor_key, window_start, count) values ('human:production:old-actor', $1, 1)`,
+      [staleAt],
+    );
+    await sql(
+      `insert into rate_limits (actor_key, window_start, count) values ('login:ip:203.0.113.9', date_trunc('minute', now()), 4)`,
+    );
+    for (let n = 0; n < RATE_LIMIT_ROW_CAP + 40; n += 1) {
+      await sql(
+        `insert into rate_limits (actor_key, window_start, count) values ($1, date_trunc('minute', now()), 1)`,
+        [`login:user:flood-${n}`],
+      );
+    }
+    assert.equal(await rateLimit("login:user:kept-probe", 5), true);
+    const stored = await sql<{ n: number | string }>(`select count(*)::int as n from rate_limits where actor_key like 'login:user:%'`);
+    assert.ok(Number(stored[0].n) <= RATE_LIMIT_ROW_CAP + 1);
+    const staleNames = await sql<{ n: number | string }>(
+      `select count(*)::int as n from rate_limits where actor_key like 'login:user:old-%' or actor_key = 'human:production:old-actor'`,
+    );
+    assert.equal(Number(staleNames[0].n), 0);
+    const ipKept = await sql<{ n: number | string }>(
+      `select count(*)::int as n from rate_limits where actor_key = 'login:ip:203.0.113.9'`,
+    );
+    assert.equal(Number(ipKept[0].n), 1);
+    const probeKept = await sql<{ n: number | string }>(
+      `select count(*)::int as n from rate_limits where actor_key = 'login:user:kept-probe'`,
+    );
+    assert.equal(Number(probeKept[0].n), 1);
+    await sql(`delete from rate_limits`);
 
     const adminUsername = "admin";
     const adminPassword = generated();
@@ -215,6 +252,12 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal(first.status, 200, JSON.stringify(first.data));
     assert.equal(first.data.mustChangePassword, false);
     remember(admin.email, first);
+    const missingLogin = await call("POST", "/api/auth/login", { body: { username: "no-such-name", password: wrong } });
+    const wrongLogin = await call("POST", "/api/auth/login", { body: { username: adminUsername, password: wrong } });
+    assert.equal(missingLogin.status, wrongLogin.status);
+    assert.equal(missingLogin.status, 401);
+    assert.equal(missingLogin.data.error, wrongLogin.data.error);
+    assert.equal(missingLogin.data.message, wrongLogin.data.message);
     const kept = await call("GET", `/api/tasks/${keptId}`, { actor: admin });
     assert.equal(kept.status, 200);
     assert.equal(kept.data.task.owner.id, adminId);

@@ -2,19 +2,19 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { ReportLines, type ReportLine } from "@/app/reports/lines";
 import { api } from "@/components/api";
 import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
 
-type Line = { id: string; href: string; title: string; ownerName: string; status: string; dueDate: string | null; delayReason: string | null };
 type Report = {
   week: { start: string; end: string };
   text: string;
   csv: string;
-  doneThisWeek: Line[];
-  inProgress: Line[];
-  overdue: Line[];
-  nextWeekTasks: Line[];
+  doneThisWeek: ReportLine[];
+  inProgress: ReportLine[];
+  overdue: ReportLine[];
+  nextWeekTasks: ReportLine[];
   byAssignee: { id: string; name: string; open: number; overdue: number; doneThisWeek: number }[];
 };
 
@@ -105,40 +105,16 @@ export default function ReportsPage() {
             <span className="title">{row.name}</span>
             <span className="sub">진행 {row.open} · 지연 {row.overdue} · 이번 주 완료 {row.doneThisWeek}</span>
           </Link>
-        )) : <Lines rows={rowsOf(report, open)} delay={open === "overdue"} />}
+        )) : <ReportLines rows={rowsOf(report, open)} delay={open === "overdue"} />}
       </article>
     </div>
   );
 }
 
-function rowsOf(report: Report, id: (typeof ORDER)[number]): Line[] {
+function rowsOf(report: Report, id: (typeof ORDER)[number]): ReportLine[] {
   if (id === "done") return report.doneThisWeek;
   if (id === "progress") return report.inProgress;
   if (id === "overdue") return report.overdue;
   if (id === "next") return report.nextWeekTasks;
   return [];
-}
-
-function Lines({ rows, delay }: { rows: Line[]; delay: boolean }) {
-  if (rows.length === 0) return <p className="state">없음</p>;
-  return (
-    <div className="table-wrap">
-      <table className="board">
-        <thead>
-          <tr><th>업무</th><th>담당</th><th>상태</th><th>마감</th>{delay ? <th>지연 사유</th> : null}</tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.id}>
-              <td><Link href={row.href}>{row.title}</Link></td>
-              <td>{row.ownerName}</td>
-              <td>{row.status}</td>
-              <td>{row.dueDate ?? "—"}</td>
-              {delay ? <td>{row.delayReason?.trim() ? row.delayReason : "사유 미입력"}</td> : null}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
 }

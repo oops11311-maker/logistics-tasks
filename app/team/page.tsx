@@ -1,10 +1,12 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
-import { api, CADENCES, cadenceLabel, canWrite, PRIORITIES, STATUSES, type Task } from "@/components/api";
-import { changeCadence, changeStatus, State, TaskTables } from "@/components/bits";
+import { applyBulk, BulkBar } from "@/app/team/bulk";
+import { TeamFilters } from "@/app/team/filters";
+import { TeamCalendar, TeamKanban, TeamList } from "@/app/team/views";
+import { api, canWrite, type Task } from "@/components/api";
+import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
 
 function TeamInner() {
@@ -57,31 +59,6 @@ function TeamInner() {
     router.replace(`/team?${next.toString()}`);
   }
 
-  async function applyBulk(kind: "status" | "owner") {
-    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
-    const versions: Record<string, number> = {};
-    for (const task of items) if (selected.has(task.id)) versions[task.id] = task.version;
-    const body = kind === "status"
-      ? { ids: [...selected], versions, status: bulkStatus, holdReason: bulkStatus === "보류" ? window.prompt("보류 사유") : undefined }
-      : { ids: [...selected], versions, ownerId: bulkOwner };
-    if (kind === "status" && bulkStatus === "보류" && !body.holdReason) return;
-    try {
-      const result = await api<{ results: { ok: boolean; message?: string }[] }>("/api/tasks/bulk", {
-        method: "POST",
-        mutate: true,
-        body: JSON.stringify(body),
-      });
-      const failed = result.results.filter((item) => !item.ok).length;
-      toast(failed ? `${failed}건은 저장하지 못했습니다.` : "저장했습니다.");
-      setSelected(new Set());
-      reload();
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "저장하지 못했습니다.");
-    }
-  }
-
-  const cells = calendarCells(month);
-
   return (
     <div>
       <div className="tabs">
@@ -89,97 +66,43 @@ function TeamInner() {
           <button key={key} className={view === key ? "tab on" : "tab"} onClick={() => setParam("view", key)}>{label}</button>
         ))}
       </div>
-      <form className="filters" onSubmit={(event) => event.preventDefault()}>
-        <input className="field grow" aria-label="검색" placeholder="제목·본문 검색" defaultValue={params.get("q") ?? ""} onBlur={(event) => setParam("q", event.target.value)} />
-        <select className="control" aria-label="담당자" value={params.get("assigneeId") ?? ""} onChange={(event) => setParam("assigneeId", event.target.value)}>
-          <option value="">담당자 전체</option>
-          {members.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
-        </select>
-        <select className="control" aria-label="프로젝트" value={params.get("categoryId") ?? ""} onChange={(event) => setParam("categoryId", event.target.value)}>
-          <option value="">프로젝트 전체</option>
-          {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-        </select>
-        <select className="control" aria-label="상태" value={params.get("status") ?? ""} onChange={(event) => setParam("status", event.target.value)}>
-          <option value="">상태 전체</option>
-          {STATUSES.map((status) => <option key={status}>{status}</option>)}
-        </select>
-        <select className="control" aria-label="우선순위" value={params.get("priority") ?? ""} onChange={(event) => setParam("priority", event.target.value)}>
-          <option value="">우선순위 전체</option>
-          {PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}
-        </select>
-        <select className="control" aria-label="반복" value={params.get("kind") ?? ""} onChange={(event) => setParam("kind", event.target.value)}>
-          <option value="">반복 전체</option>
-          {CADENCES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-        </select>
-        <select className="control" aria-label="마감" value={params.get("due") ?? ""} onChange={(event) => setParam("due", event.target.value)}>
-          <option value="">마감 전체</option>
-          <option value="today">오늘</option>
-          <option value="week">이번 주</option>
-          <option value="overdue">지연</option>
-          <option value="next">다음 주</option>
-        </select>
-      </form>
+      <TeamFilters
+        q={params.get("q") ?? ""}
+        assigneeId={params.get("assigneeId") ?? ""}
+        categoryId={params.get("categoryId") ?? ""}
+        status={params.get("status") ?? ""}
+        priority={params.get("priority") ?? ""}
+        kind={params.get("kind") ?? ""}
+        due={params.get("due") ?? ""}
+        categories={categories}
+        members={members}
+        onParam={setParam}
+      />
       {selected.size > 0 && canWrite(me.role) ? (
-        <div className="filters">
-          <select className="control" value={bulkStatus} onChange={(event) => setBulkStatus(event.target.value)} aria-label="일괄 상태">
-            {STATUSES.map((status) => <option key={status}>{status}</option>)}
-          </select>
-          <button className="btn mutate" disabled={!online} onClick={() => void applyBulk("status")}>상태 적용</button>
-          {me.role === "admin" ? (
-            <>
-              <select className="control" value={bulkOwner} onChange={(event) => setBulkOwner(event.target.value)} aria-label="일괄 담당자">
-                <option value="">담당자</option>
-                {members.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
-              </select>
-              <button className="btn mutate" disabled={!online || !bulkOwner} onClick={() => void applyBulk("owner")}>담당 적용</button>
-            </>
-          ) : null}
-        </div>
+        <BulkBar
+          role={me.role}
+          online={online}
+          members={members}
+          bulkStatus={bulkStatus}
+          bulkOwner={bulkOwner}
+          onStatus={setBulkStatus}
+          onOwner={setBulkOwner}
+          onApply={(kind) => void applyBulk({
+            kind, items, selected, bulkStatus, bulkOwner, online, toast, reload, clear: () => setSelected(new Set()),
+          })}
+        />
       ) : null}
       {loading ? <State kind="loading">불러오는 중…</State> : error ? <State kind="error" onRetry={load}>{error}</State> : view === "kanban" ? (
-        <div className="kanban">
-          {STATUSES.map((status) => (
-            <section key={status} className="column">
-              <h3>{status}</h3>
-              {items.filter((task) => task.status === status).map((task) => (
-                <article key={task.id} className="kcard">
-                  <Link href={task.href}><strong>{task.title}</strong></Link>
-                  <div className="sub">{cadenceLabel(task.workKind)} · {task.owner.name} · {task.dueDate ?? "마감 없음"}</div>
-                  {canWrite(me.role) ? (
-                    <select className="control mutate" aria-label={`${task.title} 상태`} value={task.status} onChange={(event) => void changeStatus(task, event.target.value, online, toast, reload)}>
-                      {STATUSES.map((item) => <option key={item}>{item}</option>)}
-                    </select>
-                  ) : null}
-                </article>
-              ))}
-            </section>
-          ))}
-        </div>
+        <TeamKanban items={items} role={me.role} online={online} toast={toast} reload={reload} />
       ) : view === "calendar" ? (
-        <div>
-          <div className="row">
-            <button className="btn" onClick={() => setParam("month", shiftMonth(month, -1))}>이전 달</button>
-            <strong>{month} · 서울</strong>
-            <button className="btn" onClick={() => setParam("month", shiftMonth(month, 1))}>다음 달</button>
-          </div>
-          <div className="cal">
-            {["월", "화", "수", "목", "금", "토", "일"].map((label) => <div key={label} className="dow">{label}</div>)}
-            {cells.map((day, index) => (
-              <div key={day || `blank-${index}`} className="day">
-                {day ? (
-                  <>
-                    <b>{Number(day.slice(8))}</b>
-                    {items.filter((task) => task.dueDate === day).map((task) => <Link key={task.id} href={task.href}>{task.title}</Link>)}
-                  </>
-                ) : null}
-              </div>
-            ))}
-          </div>
-        </div>
+        <TeamCalendar month={month} items={items} onMonth={(next) => setParam("month", next)} />
       ) : (
-        <TaskTables
+        <TeamList
           items={items}
-          writable={canWrite(me.role)}
+          role={me.role}
+          online={online}
+          toast={toast}
+          reload={reload}
           selected={selected}
           onSelect={(id, checked) => setSelected((current) => {
             const next = new Set(current);
@@ -187,30 +110,10 @@ function TeamInner() {
             else next.delete(id);
             return next;
           })}
-          onStatus={(task, status) => void changeStatus(task, status, online, toast, reload)}
-          onCadence={(task, cadence) => void changeCadence(task, cadence, online, toast, reload)}
         />
       )}
     </div>
   );
-}
-
-function shiftMonth(month: string, delta: number): string {
-  const [year, mon] = month.split("-").map(Number);
-  const date = new Date(Date.UTC(year, mon - 1 + delta, 1));
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
-}
-
-function calendarCells(month: string): string[] {
-  const [year, mon] = month.split("-").map(Number);
-  const first = new Date(Date.UTC(year, mon - 1, 1));
-  const offset = (first.getUTCDay() + 6) % 7;
-  const last = new Date(Date.UTC(year, mon, 0)).getUTCDate();
-  const cells: string[] = Array.from({ length: offset }, () => "");
-  for (let day = 1; day <= last; day += 1) {
-    cells.push(`${month}-${String(day).padStart(2, "0")}`);
-  }
-  return cells;
 }
 
 export default function TeamPage() {

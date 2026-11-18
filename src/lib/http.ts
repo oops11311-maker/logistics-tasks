@@ -61,6 +61,8 @@ export function isUniqueViolation(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "23505";
 }
 
+export const RATE_LIMIT_ROW_CAP = 128;
+
 export async function rateLimit(key: string, limit: number): Promise<boolean> {
   const windowStart = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
   const rows = await sql<{ count: number }>(
@@ -71,9 +73,19 @@ export async function rateLimit(key: string, limit: number): Promise<boolean> {
      returning count`,
     [key, windowStart],
   );
+  await sql(`delete from rate_limits where window_start < now() - interval '10 minutes'`);
   await sql(
-    `delete from rate_limits where actor_key = $1 and window_start < now() - interval '10 minutes'`,
-    [key],
+    `delete from rate_limits as target
+     using (
+       select actor_key, window_start
+       from rate_limits
+       where actor_key like 'login:user:%' and actor_key <> $1
+       order by window_start desc, actor_key asc
+       offset $2
+     ) as extra
+     where target.actor_key = extra.actor_key
+       and target.window_start = extra.window_start`,
+    [key, RATE_LIMIT_ROW_CAP],
   );
   return Number(rows[0]?.count ?? 0) <= limit;
 }

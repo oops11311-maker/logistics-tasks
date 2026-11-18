@@ -26,7 +26,6 @@ type MemberRow = {
 };
 
 const HUMAN_ROLES = new Set(["admin", "manager", "member", "viewer"]);
-export const FIRST_ADMIN_EMAIL = "oops11311@gmail.com";
 const USERNAME = /^[a-z0-9._@-]{3,80}$/;
 
 export function normalizeUsername(value: string): string {
@@ -369,9 +368,6 @@ export async function updateMember(actor: Actor, memberId: string, body: Record<
     if (name.length < 1 || name.length > 80) throw new HttpError(400, "invalid", "이름을 확인하세요.");
     if (email !== "" && (!EMAIL.test(email) || email.length > 200)) throw new HttpError(400, "invalid", "이메일을 확인하세요.");
     if (!HUMAN_ROLES.has(role)) throw new HttpError(400, "invalid", "역할이 올바르지 않습니다.");
-    if (member.id === actor.memberId && email.toLowerCase() !== member.email_norm) {
-      throw new HttpError(400, "invalid", "본인 이메일은 바꿀 수 없습니다.");
-    }
     if (member.id === actor.memberId && !active) {
       throw new HttpError(400, "invalid", "자신의 계정은 비활성화할 수 없습니다.");
     }
@@ -392,16 +388,29 @@ export async function updateMember(actor: Actor, memberId: string, body: Record<
       );
       if (taken[0]) throw new HttpError(409, "conflict", "이미 쓰는 이메일입니다.");
     }
-    await query(
-      `update members
-       set name = $3, email = $4, email_norm = $5, role = $6, active = $7,
-           username = case when $8 = '' then username else $8 end,
-           username_norm = case when $8 = '' then username_norm else $8 end,
-           deactivated_at = case when $7 then null else coalesce(deactivated_at, now()) end,
-           updated_at = now()
-       where id = $1 and stage = $2`,
-      [member.id, actor.stage, name, email, email.toLowerCase(), role, active, usernameNorm],
-    );
+    const emailChanged = email !== member.email;
+    try {
+      await query(
+        `update members
+         set name = $3, email = $4, email_norm = $5, role = $6, active = $7,
+             username = case when $8 = '' then username else $8 end,
+             username_norm = case when $8 = '' then username_norm else $8 end,
+             deactivated_at = case when $7 then null else coalesce(deactivated_at, now()) end,
+             updated_at = now()
+         where id = $1 and stage = $2`,
+        [member.id, actor.stage, name, email, email.toLowerCase(), role, active, usernameNorm],
+      );
+      if (emailChanged) {
+        await query(
+          `insert into member_audit (id, stage, member_id, actor_id, action, before_value, after_value)
+           values ($1, $2, $3, $4, 'email', $5, $6)`,
+          [id(), actor.stage, member.id, actor.memberId, member.email, email],
+        );
+      }
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new HttpError(409, "conflict", "이미 쓰는 사용자 이름 또는 이메일입니다.");
+      throw error;
+    }
     if (!active) {
       await query(`update sessions set revoked_at = now() where member_id = $1 and revoked_at is null`, [member.id]);
     }

@@ -197,7 +197,7 @@ export default function AdminPage() {
             </tbody>
           </table>
         </div>
-        <p className="hint">계정에 있는 항목은 이름, 사용자 이름, 이메일, 역할, 사용 여부입니다. 소속 팀 칸은 없습니다. 사용자 이름을 바꿔도 이미 로그인된 세션은 유지되고, 다음 로그인은 새 이름으로 합니다.</p>
+        <p className="hint">계정에 있는 항목은 이름, 사용자 이름, 이메일, 역할, 사용 여부입니다. 소속 팀 칸은 없습니다. 사용자 이름이나 이메일을 바꿔도 이미 로그인된 세션은 유지되고, 다음 로그인은 사용자 이름으로 합니다. 이메일은 연락용이며 인증 메일은 보내지 않습니다. 비울 수 있습니다.</p>
         {editing && draft ? (
           <div className="scrim" role="presentation">
             <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="member-edit-title">
@@ -229,9 +229,9 @@ export default function AdminPage() {
                     <input className="field" aria-label="계정 사용자 이름" autoComplete="off" value={draft.username ?? ""} onChange={(event) => setDraft({ ...draft, username: event.target.value })} required />
                   </label>
                   <label className="stack">이메일
-                    <input className="field" type="email" value={draft.email} disabled={editing.id === me.id} onChange={(event) => setDraft({ ...draft, email: event.target.value })} />
+                    <input className="field" type="text" inputMode="email" autoComplete="off" aria-label="계정 이메일" value={draft.email} onChange={(event) => setDraft({ ...draft, email: event.target.value })} />
                   </label>
-                  {editing.id === me.id ? <p className="hint">본인 이메일은 바꿀 수 없습니다.</p> : null}
+                  <p className="hint">비워 둘 수 있습니다. 로그인은 사용자 이름이고, 이메일을 바꿔도 세션은 유지됩니다.</p>
                   <label className="stack">역할
                     <select className="control" value={draft.role} onChange={(event) => setDraft({ ...draft, role: event.target.value })}>
                       <option value="admin">관리자</option>

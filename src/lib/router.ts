@@ -19,7 +19,7 @@ import {
   type Actor,
   type Stage,
 } from "./access";
-import { adminSetupPassword, adminSetupStatus, assertCsrf, changeOwnPassword, createAccount, login, logout, resetAccountPassword, resolveSession, setupEntry } from "./auth";
+import { assertCsrf, changeOwnPassword, createAccount, login, logout, resetAccountPassword, resolveSession } from "./auth";
 import { sql } from "./db";
 import { asIso } from "./format";
 import {
@@ -278,9 +278,6 @@ export async function handle(request: Request): Promise<Response> {
       assertSameOrigin(request);
       return await login(request, await readJson(request));
     }
-    if (path[0] === "auth" && path[1] === "admin-setup" && method === "GET") return await adminSetupStatus(request);
-    if (path[0] === "auth" && path[1] === "setup-entry" && method === "GET") return await setupEntry(request);
-    if (path[0] === "auth" && path[1] === "admin-setup" && method === "POST") return await adminSetupPassword(request);
     if (path[0] === "bot") return await botRoute(request, method, path.slice(1), url, now);
     if (path[0] === "jobs" && path[1] === "webhook") return await webhook(request, now);
     return await humanRoute(request, method, path, url, now);

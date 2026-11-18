@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { createServer, type Server } from "node:http";
-import { createSign, generateKeyPairSync, randomBytes, randomUUID, type KeyObject } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,16 +22,16 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
   const dir = await mkdtemp(path.join(tmpdir(), "logistics-"));
   process.env.PGLITE_DATA_DIR = dir;
   process.env.LOGISTICS_TEST_AUTH = "1";
-  process.env.BOT_API_TOKEN = "bot-test-token";
-  process.env.SCHEDULER_TOKEN = "scheduler-test-token";
+  const botToken = randomBytes(18).toString("base64url");
+  const schedulerToken = randomBytes(18).toString("base64url");
+  process.env.BOT_API_TOKEN = botToken;
+  process.env.SCHEDULER_TOKEN = schedulerToken;
   delete process.env.DATABASE_URL;
   delete process.env.CURSOR_APP_ID;
   delete process.env.VERCEL;
   const { handle } = await import("../src/lib/router.ts");
   const { sql, closeDb } = await import("../src/lib/db.ts");
-  let identityServer: Server | undefined;
-  let identityKey: KeyObject | undefined;
-  const admin = { sub: "user:admin-a", email: "oops11311@gmail.com", name: "관리자", kind: "person" };
+  const admin = { sub: "user:admin-a", email: "admin@example.com", name: "관리자", kind: "person" };
   const mina = { sub: "user:mina", email: "mina@example.com", name: "미나", kind: "person" };
   const juno = { sub: "user:juno", email: "juno@example.com", name: "준호", kind: "person" };
   const outsider = { sub: "user:out", email: "out@example.com", name: "외부인", kind: "person" };
@@ -162,216 +161,57 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     const limited = await call("POST", "/api/auth/login", { body: { username: "missing-user", password: wrong } });
     assert.equal(limited.status, 429);
 
+    let sharedBucket = false;
+    for (let n = 0; n < 20; n += 1) {
+      const attempt = await call("POST", "/api/auth/login", {
+        headers: { "x-forwarded-for": `198.51.100.${n}` },
+        body: { username: `absent-${n}`, password: wrong },
+      });
+      if (attempt.status === 429) {
+        sharedBucket = true;
+        break;
+      }
+      assert.equal(attempt.status, 401);
+    }
+    assert.equal(sharedBucket, true);
+    process.env.VERCEL = "1";
+    const forwardedOnly = await call("POST", "/api/auth/login", {
+      headers: { "x-forwarded-for": "203.0.113.8" },
+      body: { username: "absent-xff", password: wrong },
+    });
+    assert.equal(forwardedOnly.status, 429);
+    const trusted = await call("POST", "/api/auth/login", {
+      headers: { "x-vercel-forwarded-for": "192.0.2.10", "x-forwarded-for": "198.51.100.50" },
+      body: { username: "absent-trusted", password: wrong },
+    });
+    assert.equal(trusted.status, 401);
+    delete process.env.VERCEL;
+    await sql(`delete from rate_limits where actor_key like 'login:%'`);
+
+    const adminUsername = "admin";
+    const adminPassword = generated();
     const adminId = randomUUID();
     const keptId = randomUUID();
     await sql(
-      `insert into members (id, stage, subject, email, email_norm, name, role, active)
-       values ($1, 'production', $2, $3, $4, $5, 'admin', true)`,
-      [adminId, admin.sub, admin.email, admin.email.toLowerCase(), admin.name],
+      `insert into members (id, stage, subject, email, email_norm, name, role, active, username, username_norm)
+       values ($1, 'production', $2, $3, $4, $5, 'admin', true, $6, $6)`,
+      [adminId, admin.sub, admin.email, admin.email.toLowerCase(), admin.name, adminUsername],
+    );
+    const { hashPassword } = await import("../src/lib/passwords.ts");
+    await sql(
+      `update members set password_hash = $2, must_change_password = false, password_version = 1 where id = $1`,
+      [adminId, await hashPassword(adminPassword)],
     );
     await sql(
       `insert into tasks (id, stage, title, owner_id, creator_id, priority, status)
        values ($1, 'production', '기존 담당 업무', $2, $2, '보통', '할 일')`,
       [keptId, adminId],
     );
-    const usernameMigration = await readFile(path.join(process.cwd(), "migrations/005_admin_username.sql"), "utf8");
-    for (const statement of usernameMigration.split(";").map((part) => part.trim()).filter(Boolean)) {
-      await sql(statement);
-      await sql(statement);
-    }
-    const beforeSetup = await sql<{ password_hash: string | null; username_norm: string; name: string; email_norm: string }>(
-      `select password_hash, username_norm, name, email_norm from members where id = $1`,
-      [adminId],
-    );
-    assert.equal(beforeSetup[0].password_hash, null);
-    assert.equal(beforeSetup[0].username_norm, "limjaeyeol");
-    assert.equal(beforeSetup[0].name, admin.name);
-    assert.equal(beforeSetup[0].email_norm, admin.email);
-    const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    identityKey = pair.privateKey;
-    const jwk = pair.publicKey.export({ format: "jwk" });
-    identityServer = createServer((req, res) => {
-      if (req.url === "/keys") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({
-          keys: [{ kty: "RSA", kid: "setup-test", alg: "RS256", use: "sig", n: jwk.n, e: jwk.e }],
-        }));
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
-    await new Promise<void>((resolve) => identityServer?.listen(0, "127.0.0.1", () => resolve()));
-    const address = identityServer.address();
-    if (address === null || typeof address === "string") throw new Error("issuer");
-    process.env.CURSOR_APP_ID = "logistics-setup-test";
-    process.env.CURSOR_APP_IDENTITY_ISSUER = `http://127.0.0.1:${address.port}`;
-    function signPerson(email: string, emailVerified = true): string {
-      const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: "setup-test" })).toString("base64url");
-      const now = Math.floor(Date.now() / 1000);
-      const payload = Buffer.from(JSON.stringify({
-        iss: process.env.CURSOR_APP_IDENTITY_ISSUER,
-        aud: process.env.CURSOR_APP_ID,
-        sub: "user:42",
-        iat: now,
-        exp: now + 300,
-        email,
-        email_verified: emailVerified,
-        name: "Signed",
-        idp: { provider: "cursor", sub: "42" },
-        kind: "person",
-        ver: 2,
-        app_visibility: "private",
-      })).toString("base64url");
-      const data = `${header}.${payload}`;
-      const signature = createSign("RSA-SHA256").update(data).sign(identityKey as KeyObject).toString("base64url");
-      return `${data}.${signature}`;
-    }
-    const ownerToken = signPerson(admin.email);
-    const otherToken = signPerson("other@example.com");
-    const { setupAccess } = await import("../src/lib/auth.ts");
-    const setupLogs: string[] = [];
-    const previousInfo = console.info;
-    console.info = (...args: unknown[]) => {
-      setupLogs.push(args.map((item) => String(item)).join(" "));
-    };
-    try {
-      const missing = await setupAccess(new Request("http://127.0.0.1/setup"));
-      assert.equal(missing.open, false);
-      if (!missing.open) assert.equal(missing.reason, "missing_header");
-      const mismatchedIdentity = await setupAccess(new Request("http://127.0.0.1/setup", {
-        headers: { "x-cursor-identity-v2": otherToken },
-      }));
-      assert.equal(mismatchedIdentity.open, false);
-      if (!mismatchedIdentity.open) assert.equal(mismatchedIdentity.reason, "email_mismatch");
-      assert.equal(setupLogs.some((line) => line.includes("admin_setup_closed missing_header")), true);
-      assert.equal(setupLogs.some((line) => line.includes("admin_setup_closed email_mismatch")), true);
-      assert.equal(setupLogs.some((line) => line.includes(admin.email) || line.includes(otherToken)), false);
-    } finally {
-      console.info = previousInfo;
-    }
-    const unsigned = await call("GET", "/api/auth/admin-setup");
-    assert.equal(unsigned.status, 403);
-    assert.equal(unsigned.data.open, false);
-    const forged = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": "forged.not-a.token" } });
-    assert.equal(forged.status, 403);
-    assert.equal(forged.data.open, false);
-    const otherView = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": otherToken } });
-    assert.equal(otherView.status, 403);
-    assert.equal(otherView.data.open, false);
-    const unverified = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": signPerson(admin.email, false) } });
-    assert.equal(unverified.status, 200, JSON.stringify(unverified.data));
-    assert.equal(unverified.data.open, true);
-    const cased = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": signPerson("Oops11311@Gmail.com") } });
-    assert.equal(cased.status, 200, JSON.stringify(cased.data));
-    assert.equal(cased.data.open, true);
-    const entryDenied = await call("GET", "/api/auth/setup-entry");
-    assert.equal(entryDenied.status, 303);
-    assert.equal(entryDenied.headers.get("location"), "/login?form=1");
-    const entry = await call("GET", "/api/auth/setup-entry", { headers: { "x-cursor-identity-v2": ownerToken } });
-    assert.equal(entry.status, 303);
-    assert.equal(entry.headers.get("location"), "/setup");
-    const opened = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": ownerToken } });
-    assert.equal(opened.status, 200, JSON.stringify({ open: opened.data.open }));
-    assert.equal(opened.data.open, true);
-    assert.equal(typeof opened.data.csrfToken, "string");
-    assert.equal(opened.headers.getSetCookie().some((item) => item.startsWith("logistics_setup=")), false);
-    const { issueFormProof } = await import("../src/lib/form-proof.ts");
-    const proof = opened.data.csrfToken as string;
-    async function setupPost(token: string | undefined, body: unknown, csrf: string | false = proof) {
-      const headers: Record<string, string> = {};
-      if (token) headers["x-cursor-identity-v2"] = token;
-      if (csrf !== false) headers["x-csrf-token"] = csrf;
-      return call("POST", "/api/auth/admin-setup", { headers, body });
-    }
-    await sql(`delete from rate_limits where actor_key like 'setup:%'`);
-    const expiredProof = await issueFormProof("setup", Math.floor(Date.now() / 1000) - 30);
-    const loginProof = await issueFormProof("login");
-    const alteredProof = `${proof.slice(0, -1)}${proof.endsWith("a") ? "b" : "a"}`;
-    assert.equal((await setupPost(ownerToken, { password: generated(), confirm: generated() }, expiredProof)).status, 403);
-    assert.equal((await setupPost(ownerToken, { password: generated(), confirm: generated() }, alteredProof)).status, 403);
-    assert.equal((await setupPost(ownerToken, { password: generated(), confirm: generated() }, loginProof)).status, 403);
-    const framed = await call("POST", "/api/auth/admin-setup", {
-      rawBody: new URLSearchParams({
-        password: generated(),
-        confirm: generated(),
-        csrf: proof,
-      }).toString(),
-      headers: { "x-cursor-identity-v2": ownerToken },
-    });
-    assert.equal(framed.status, 303);
-    assert.equal(framed.headers.get("location"), "/setup?error=invalid");
-    const framedMissing = await call("POST", "/api/auth/admin-setup", {
-      rawBody: new URLSearchParams({ password: generated(), confirm: generated() }).toString(),
-      headers: { "x-cursor-identity-v2": ownerToken },
-    });
-    assert.equal(framedMissing.status, 303);
-    assert.equal(framedMissing.headers.get("location"), "/setup?error=csrf");
-    const framedExpired = await call("POST", "/api/auth/admin-setup", {
-      rawBody: new URLSearchParams({
-        password: generated(),
-        confirm: generated(),
-        csrf: expiredProof,
-      }).toString(),
-      headers: { "x-cursor-identity-v2": ownerToken },
-    });
-    assert.equal(framedExpired.status, 303);
-    assert.equal(framedExpired.headers.get("location"), "/setup?error=csrf");
-    assert.equal((await call("POST", "/api/auth/admin-setup", { body: { password: generated(), confirm: generated() } })).status, 403);
-    assert.equal((await setupPost(otherToken, { password: generated(), confirm: generated() })).status, 403);
-    assert.equal((await setupPost("forged.not-a.token", { password: generated(), confirm: generated() })).status, 403);
-    const plainHeader = await call("POST", "/api/auth/admin-setup", {
-      headers: { "x-cursor-identity": admin.email, "x-csrf-token": proof },
-      body: { password: generated(), confirm: generated() },
-    });
-    assert.equal(plainHeader.status, 403);
-    assert.equal((await setupPost(ownerToken, { password: generated(), confirm: generated() }, false)).status, 403);
-    const mismatched = generated();
-    assert.equal((await setupPost(ownerToken, { password: mismatched, confirm: generated() })).status, 400);
-    assert.equal((await setupPost(ownerToken, { password: "short", confirm: "short" })).status, 400);
-    const formDenied = await call("POST", "/api/auth/admin-setup", {
-      rawBody: new URLSearchParams({ password: generated(), confirm: generated(), csrf: proof }).toString(),
-    });
-    assert.equal(formDenied.status, 303);
-    assert.equal(formDenied.headers.get("location"), "/setup?error=forbidden");
-    const formMismatch = await call("POST", "/api/auth/admin-setup", {
-      rawBody: new URLSearchParams({ password: generated(), confirm: generated(), csrf: proof }).toString(),
-      headers: { "x-cursor-identity-v2": ownerToken },
-    });
-    assert.equal(formMismatch.status, 303);
-    assert.equal(formMismatch.headers.get("location"), "/setup?error=invalid");
-    const stillEmpty = await sql<{ password_hash: string | null }>(`select password_hash from members where id = $1`, [adminId]);
-    assert.equal(stillEmpty[0].password_hash, null);
-    const chosen = generated();
-    const setupRace = await Promise.all([
-      setupPost(ownerToken, { password: chosen, confirm: chosen }),
-      setupPost(ownerToken, { password: chosen, confirm: chosen }),
-    ]);
-    assert.deepEqual(setupRace.map((item) => item.status).sort(), [200, 409]);
-    const stored = await sql<{ password_hash: string; username_norm: string; name: string; email: string; email_norm: string }>(
-      `select password_hash, username_norm, name, email, email_norm from members where id = $1`,
-      [adminId],
-    );
-    assert.match(stored[0].password_hash, /^scrypt\$/);
-    assert.equal(stored[0].password_hash.includes(chosen), false);
-    assert.equal(stored[0].username_norm, "limjaeyeol");
-    assert.equal(stored[0].name, admin.name);
-    assert.equal(stored[0].email, admin.email);
-    assert.equal(stored[0].email_norm, admin.email);
-    const closed = await call("GET", "/api/auth/admin-setup", { headers: { "x-cursor-identity-v2": ownerToken } });
-    assert.equal(closed.status, 200);
-    assert.equal(closed.data.open, false);
-    await sql(`delete from rate_limits where actor_key like 'setup:%'`);
-    const repeatSetup = generated();
-    assert.equal((await setupPost(ownerToken, { password: repeatSetup, confirm: repeatSetup })).status, 403);
-    delete process.env.CURSOR_APP_ID;
-    delete process.env.CURSOR_APP_IDENTITY_ISSUER;
-    identityServer.close();
-    identityServer = undefined;
+    assert.equal((await call("GET", "/api/auth/admin-setup")).status, 401);
+    assert.equal((await call("POST", "/api/auth/admin-setup", { body: { password: generated(), confirm: generated() } })).status, 401);
     const keptBefore = await call("GET", `/api/tasks/${keptId}`);
     assert.equal(keptBefore.status, 401);
-    assert.equal((await call("POST", "/api/auth/login", { body: { username: admin.email, password: chosen } })).status, 401);
-    const first = await call("POST", "/api/auth/login", { body: { username: "limjaeyeol", password: chosen } });
+    const first = await call("POST", "/api/auth/login", { body: { username: adminUsername, password: adminPassword } });
     assert.equal(first.status, 200, JSON.stringify(first.data));
     assert.equal(first.data.mustChangePassword, false);
     remember(admin.email, first);
@@ -524,7 +364,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal((await call("GET", "/api/admin/state", { actor: mina })).status, 403);
 
     const before = again.data.task;
-    const botHeaders = { token: "bot-test-token" };
+    const botHeaders = { token: botToken };
     assert.equal((await call("POST", `/api/tasks/${taskId}/complete`, { ...botHeaders, body: { version: before.version } })).status, 403);
     assert.equal((await call("PATCH", `/api/tasks/${taskId}`, { ...botHeaders, body: { version: before.version, ownerId: junoBoot.data.me.id, dueDate: "2026-12-01", status: "완료" } })).status, 403);
     assert.equal((await call("POST", `/api/tasks/${taskId}/trash`, { ...botHeaders, body: { version: before.version } })).status, 403);
@@ -610,20 +450,20 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
 
     const now = seoulToUtc("2026-11-18", 9, 30).toISOString();
     const firstRun = await call("POST", "/api/jobs/webhook", {
-      token: "scheduler-test-token",
+      token: schedulerToken,
       now,
       headers: { "idempotency-key": "morning:2026-11-18" },
     });
     assert.equal(firstRun.status, 200, JSON.stringify(firstRun.data));
     const secondRun = await call("POST", "/api/jobs/webhook", {
-      token: "scheduler-test-token",
+      token: schedulerToken,
       now,
       headers: { "idempotency-key": "morning:2026-11-18" },
     });
     assert.equal(secondRun.status, 200);
     assert.equal(secondRun.data.duplicate, true);
     await sql(`update job_state set last_success_slot = null where stage = 'production'`);
-    const thirdRun = await call("POST", "/api/jobs/webhook", { token: "scheduler-test-token", now });
+    const thirdRun = await call("POST", "/api/jobs/webhook", { token: schedulerToken, now });
     assert.equal(thirdRun.status, 200, JSON.stringify(thirdRun.data));
 
     const occurrences = await sql<{ n: number }>(
@@ -635,7 +475,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     );
     const rerunOccurrences = occurrences[0].n;
     const rerunAlerts = alerts[0].n;
-    await call("POST", "/api/jobs/webhook", { token: "scheduler-test-token", now });
+    await call("POST", "/api/jobs/webhook", { token: schedulerToken, now });
     const occurrencesAfter = await sql<{ n: number }>(
       `select count(*)::int as n from tasks where title = '매일 재고' and is_template = false`,
     );
@@ -691,7 +531,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal(restored.status, 201);
     assert.equal(restored.data.restored, true);
     assert.equal((await call("DELETE", `/api/categories/${made.data.id}`, { actor: mina })).status, 403);
-    assert.equal((await call("DELETE", `/api/categories/${made.data.id}`, { token: "bot-test-token" })).status, 403);
+    assert.equal((await call("DELETE", `/api/categories/${made.data.id}`, { token: botToken })).status, 403);
     const manager = { sub: "user:manager-a", email: "manager@example.com", name: "매니저", kind: "person" };
     await createAndLogin(manager, "manager", "manager");
     const managerBoot = await call("GET", "/api/bootstrap", { actor: manager });
@@ -701,7 +541,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal((await call("DELETE", `/api/categories/${made.data.id}`, { actor: manager })).status, 403);
     assert.equal((await call("PATCH", `/api/categories/${made.data.id}`, { actor: manager, body: { archived: true } })).status, 403);
     assert.equal((await call("PATCH", `/api/categories/${made.data.id}`, { actor: manager, body: { name: "매니저가 바꿈" } })).status, 403);
-    assert.equal((await call("PATCH", `/api/categories/${made.data.id}`, { token: "bot-test-token", body: { name: "봇이 바꿈" } })).status, 403);
+    assert.equal((await call("PATCH", `/api/categories/${made.data.id}`, { token: botToken, body: { name: "봇이 바꿈" } })).status, 403);
     const renamedBoard = await call("PATCH", `/api/categories/${made.data.id}`, { actor: admin, body: { name: "관리자가 바꿈" } });
     assert.equal(renamedBoard.status, 200, JSON.stringify(renamedBoard.data));
 
@@ -717,13 +557,56 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
       body: { name: "바뀌면 안 됨" },
     })).status, 403);
     assert.equal((await call("PATCH", `/api/admin/members/${junoBoot.data.me.id}`, {
-      token: "bot-test-token",
+      token: botToken,
       body: { name: "봇이 바꿈" },
+    })).status, 403);
+    const adminCookie = sessions.get(admin.email)?.cookie ?? "";
+    const prior = await sql<{ password_hash: string }>(`select password_hash from members where id = $1`, [boot.data.me.id]);
+    const changedMail = await call("PATCH", `/api/admin/members/${boot.data.me.id}`, {
+      actor: admin,
+      body: { email: "Owner.Changed@Example.com" },
+    });
+    assert.equal(changedMail.status, 200, JSON.stringify(changedMail.data));
+    const mailRow = await sql<{ email: string; email_norm: string; same: boolean | string }>(
+      `select email, email_norm, (password_hash is not distinct from $2) as same from members where id = $1`,
+      [boot.data.me.id, prior[0].password_hash],
+    );
+    assert.equal(mailRow[0].email, "Owner.Changed@Example.com");
+    assert.equal(mailRow[0].email_norm, "owner.changed@example.com");
+    assert.equal(mailRow[0].same === true || mailRow[0].same === "t" || mailRow[0].same === "true", true);
+    assert.equal((await call("GET", "/api/bootstrap", { headers: { cookie: adminCookie } })).status, 200);
+    const audit = await sql<{ n: number | string }>(
+      `select count(*)::int as n from member_audit where member_id = $1 and action = 'email' and after_value = $2`,
+      [boot.data.me.id, "Owner.Changed@Example.com"],
+    );
+    assert.equal(Number(audit[0].n), 1);
+    assert.equal((await call("PATCH", `/api/admin/members/${boot.data.me.id}`, {
+      actor: admin,
+      body: { email: "not-an-email" },
+    })).status, 400);
+    assert.equal((await call("PATCH", `/api/admin/members/${junoBoot.data.me.id}`, {
+      actor: admin,
+      body: { email: "MINA@example.com" },
+    })).status, 409);
+    assert.equal((await call("PATCH", `/api/admin/members/${boot.data.me.id}`, {
+      actor: manager,
+      body: { email: "manager-set@example.com" },
+    })).status, 403);
+    assert.equal((await call("PATCH", `/api/admin/members/${boot.data.me.id}`, {
+      token: botToken,
+      body: { email: "bot-set@example.com" },
     })).status, 403);
     assert.equal((await call("PATCH", `/api/admin/members/${boot.data.me.id}`, {
       actor: admin,
-      body: { email: "other@example.com" },
-    })).status, 400);
+      body: { email: "" },
+    })).status, 200);
+    assert.equal((await call("PATCH", `/api/admin/members/${junoBoot.data.me.id}`, {
+      actor: admin,
+      body: { email: "" },
+    })).status, 200);
+    const emptied = await sql<{ email: string }>(`select email from members where id = $1`, [boot.data.me.id]);
+    assert.equal(emptied[0].email, "");
+    assert.equal((await call("GET", "/api/bootstrap", { headers: { cookie: adminCookie } })).status, 200);
     assert.equal((await call("PATCH", `/api/admin/members/${boot.data.me.id}`, {
       actor: admin,
       body: { role: "member" },
@@ -737,7 +620,7 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     const resetPassword = generated();
     const minaCookieBeforeReset = sessions.get(mina.email)?.cookie ?? "";
     assert.equal((await call("POST", `/api/admin/accounts/${minaBoot.data.me.id}/password`, { actor: mina, body: { password: resetPassword } })).status, 403);
-    assert.equal((await call("POST", `/api/admin/accounts/${minaBoot.data.me.id}/password`, { token: "bot-test-token", body: { password: resetPassword } })).status, 403);
+    assert.equal((await call("POST", `/api/admin/accounts/${minaBoot.data.me.id}/password`, { token: botToken, body: { password: resetPassword } })).status, 403);
     const resetResult = await call("POST", `/api/admin/accounts/${minaBoot.data.me.id}/password`, { actor: admin, body: { password: resetPassword } });
     assert.equal(resetResult.status, 200, JSON.stringify(resetResult.data));
     assert.equal((await call("GET", "/api/bootstrap", { headers: { cookie: minaCookieBeforeReset } })).status, 401);
@@ -770,9 +653,6 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     await runNode("tests/restart-read.ts", restartDir);
     await rm(restartDir, { recursive: true, force: true });
   } finally {
-    delete process.env.CURSOR_APP_ID;
-    delete process.env.CURSOR_APP_IDENTITY_ISSUER;
-    identityServer?.close();
     await closeDb();
     await rm(dir, { recursive: true, force: true });
   }

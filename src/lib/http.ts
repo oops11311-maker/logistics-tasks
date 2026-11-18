@@ -65,28 +65,25 @@ export const RATE_LIMIT_ROW_CAP = 128;
 
 export async function rateLimit(key: string, limit: number): Promise<boolean> {
   const windowStart = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
+  await sql(`delete from rate_limits where window_start < now() - interval '10 minutes'`);
   const rows = await sql<{ count: number }>(
     `insert into rate_limits (actor_key, window_start, count)
-     values ($1, $2, 1)
+     select $1, $2, 1
+     where $1 not like 'login:user:%'
+        or exists (
+          select 1 from rate_limits
+          where actor_key = $1 and window_start = $2
+        )
+        or (
+          select count(*) from rate_limits
+          where actor_key like 'login:user:%'
+        ) < $3
      on conflict (actor_key, window_start)
      do update set count = rate_limits.count + 1
      returning count`,
-    [key, windowStart],
+    [key, windowStart, RATE_LIMIT_ROW_CAP],
   );
-  await sql(`delete from rate_limits where window_start < now() - interval '10 minutes'`);
-  await sql(
-    `delete from rate_limits as target
-     using (
-       select actor_key, window_start
-       from rate_limits
-       where actor_key like 'login:user:%' and actor_key <> $1
-       order by window_start desc, actor_key asc
-       offset $2
-     ) as extra
-     where target.actor_key = extra.actor_key
-       and target.window_start = extra.window_start`,
-    [key, RATE_LIMIT_ROW_CAP],
-  );
+  if (rows.length === 0) return true;
   return Number(rows[0]?.count ?? 0) <= limit;
 }
 

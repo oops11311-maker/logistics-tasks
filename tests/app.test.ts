@@ -154,9 +154,11 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
     const wrong = generated();
+    let deniedMessage = "";
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const failed = await call("POST", "/api/auth/login", { body: { username: "missing-user", password: wrong } });
       assert.equal(failed.status, 401);
+      deniedMessage = String(failed.data.message);
     }
     const limited = await call("POST", "/api/auth/login", { body: { username: "missing-user", password: wrong } });
     assert.equal(limited.status, 429);
@@ -208,21 +210,49 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
         [`login:user:flood-${n}`],
       );
     }
+    const beforeFlood = await sql<{ n: number | string }>(
+      `select count(*)::int as n from rate_limits where actor_key like 'login:user:flood-%'`,
+    );
     assert.equal(await rateLimit("login:user:kept-probe", 5), true);
     const stored = await sql<{ n: number | string }>(`select count(*)::int as n from rate_limits where actor_key like 'login:user:%'`);
-    assert.ok(Number(stored[0].n) <= RATE_LIMIT_ROW_CAP + 1);
+    assert.equal(Number(stored[0].n), Number(beforeFlood[0].n));
     const staleNames = await sql<{ n: number | string }>(
       `select count(*)::int as n from rate_limits where actor_key like 'login:user:old-%' or actor_key = 'human:production:old-actor'`,
     );
     assert.equal(Number(staleNames[0].n), 0);
-    const ipKept = await sql<{ n: number | string }>(
-      `select count(*)::int as n from rate_limits where actor_key = 'login:ip:203.0.113.9'`,
+    const ipKept = await sql<{ count: number | string }>(
+      `select count from rate_limits where actor_key = 'login:ip:203.0.113.9'`,
     );
-    assert.equal(Number(ipKept[0].n), 1);
+    assert.equal(Number(ipKept[0].count), 4);
     const probeKept = await sql<{ n: number | string }>(
       `select count(*)::int as n from rate_limits where actor_key = 'login:user:kept-probe'`,
     );
-    assert.equal(Number(probeKept[0].n), 1);
+    assert.equal(Number(probeKept[0].n), 0);
+    const windowStart = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
+    await sql(
+      `insert into rate_limits (actor_key, window_start, count) values ('login:user:pinned-name', $1, 5)`,
+      [windowStart],
+    );
+    assert.equal(await rateLimit("login:user:pinned-name", 5), false);
+    const pinned = await sql<{ count: number | string }>(
+      `select count from rate_limits where actor_key = 'login:user:pinned-name'`,
+    );
+    assert.equal(Number(pinned[0].count), 6);
+    const flooded = await sql<{ n: number | string }>(
+      `select count(*)::int as n from rate_limits where actor_key like 'login:user:flood-%'`,
+    );
+    assert.equal(Number(flooded[0].n), Number(beforeFlood[0].n));
+    for (let n = 0; n < 20; n += 1) assert.equal(await rateLimit("login:ip:198.51.100.77", 20), true);
+    assert.equal(await rateLimit("login:ip:198.51.100.77", 20), false);
+    const stillPinned = await call("POST", "/api/auth/login", { body: { username: "pinned-name", password: wrong } });
+    assert.equal(stillPinned.status, 429);
+    const unseen = await call("POST", "/api/auth/login", { body: { username: "never-seen-name", password: wrong } });
+    assert.equal(unseen.status, 401);
+    assert.equal(unseen.data.message, deniedMessage);
+    const pinnedAfterLogin = await sql<{ count: number | string }>(
+      `select count from rate_limits where actor_key = 'login:user:pinned-name'`,
+    );
+    assert.equal(Number(pinnedAfterLogin[0].count), 7);
     await sql(`delete from rate_limits`);
 
     const adminUsername = "admin";

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { sql } from "./db";
 
 export class HttpError extends Error {
@@ -63,27 +64,23 @@ export function isUniqueViolation(error: unknown): boolean {
 
 export const RATE_LIMIT_ROW_CAP = 128;
 
+export function rateLimitStorageKey(key: string): string {
+  if (!key.startsWith("login:user:")) return key;
+  const bucket = createHash("sha256").update(key).digest().readUInt32BE(0) % RATE_LIMIT_ROW_CAP;
+  return `login:user:#${bucket}`;
+}
+
 export async function rateLimit(key: string, limit: number): Promise<boolean> {
   const windowStart = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
   await sql(`delete from rate_limits where window_start < now() - interval '10 minutes'`);
   const rows = await sql<{ count: number }>(
     `insert into rate_limits (actor_key, window_start, count)
-     select $1, $2, 1
-     where $1 not like 'login:user:%'
-        or exists (
-          select 1 from rate_limits
-          where actor_key = $1 and window_start = $2
-        )
-        or (
-          select count(*) from rate_limits
-          where actor_key like 'login:user:%'
-        ) < $3
+     values ($1, $2, 1)
      on conflict (actor_key, window_start)
      do update set count = rate_limits.count + 1
      returning count`,
-    [key, windowStart, RATE_LIMIT_ROW_CAP],
+    [rateLimitStorageKey(key), windowStart],
   );
-  if (rows.length === 0) return true;
   return Number(rows[0]?.count ?? 0) <= limit;
 }
 

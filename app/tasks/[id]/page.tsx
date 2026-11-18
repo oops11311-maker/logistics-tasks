@@ -4,15 +4,12 @@ import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { TaskActivity } from "@/app/tasks/[id]/activity";
 import { TaskEditor } from "@/app/tasks/[id]/editor";
-import { api, ApiError, canWrite, type Task } from "@/components/api";
+import { actOnTask } from "@/app/tasks/[id]/task-act";
+import { sendTaskComment } from "@/app/tasks/[id]/task-comment";
+import { saveTask, type Detail } from "@/app/tasks/[id]/task-save";
+import { api, canWrite, type Task } from "@/components/api";
 import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
-
-type Detail = {
-  task: Task;
-  comments: { id: string; body: string; kind: string; createdAt: string | null; author: { name: string } }[];
-  events: { id: string; action: string; field: string | null; oldValue: string | null; newValue: string | null; actorKind: string; actorName: string; createdAt: string | null }[];
-};
 
 export default function TaskPage() {
   const params = useParams<{ id: string }>();
@@ -50,72 +47,13 @@ export default function TaskPage() {
     setDirty(true);
   }
 
-  async function save() {
-    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
-    try {
-      const saved = await api<Detail>(`/api/tasks/${task.id}`, {
-        method: "PATCH",
-        mutate: true,
-        body: JSON.stringify({
-          version: task.version,
-          title: task.title,
-          body: task.body,
-          categoryId: task.categoryId,
-          ...(me.role === "admin" ? {
-            ownerId: task.owner.id,
-            collaboratorIds: task.collaborators.map((person) => person.id),
-          } : {}),
-          startDate: task.startDate,
-          dueDate: task.dueDate,
-          dueTime: task.dueTime,
-          priority: task.priority,
-          status: task.status,
-          checklist: task.checklist,
-          tags: task.tags,
-          links: task.links,
-          holdReason: task.holdReason,
-          delayReason: task.delayReason,
-          workKind: task.workKind,
-        }),
-      });
-      setDetail(saved);
-      setDirty(false);
-      toast("저장했습니다.");
-      reload();
-    } catch (reason) {
-      toast(reason instanceof ApiError ? reason.message : "저장하지 못했습니다.");
-      if (reason instanceof ApiError && reason.status === 409) load();
-    }
-  }
-
-  async function act(path: string) {
-    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
-    try {
-      const saved = await api<Detail>(path, { method: "POST", mutate: true, body: JSON.stringify({ version: task.version }) });
-      setDetail(saved);
-      toast("저장했습니다.");
-      reload();
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "저장하지 못했습니다.");
-    }
-  }
-
-  async function sendComment(event: React.FormEvent) {
-    event.preventDefault();
-    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
-    try {
-      await api(`/api/tasks/${task.id}/comments`, { method: "POST", mutate: true, body: JSON.stringify({ body: comment }) });
-      setComment("");
-      toast("저장했습니다.");
-      load();
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "저장하지 못했습니다.");
-    }
+  function sendComment(event: React.FormEvent) {
+    return sendTaskComment({ event, online, toast, taskId: task.id, comment, clear: () => setComment(""), load });
   }
 
   return (
     <div className="cards-2">
-      <TaskEditor task={task} categories={categories} members={members} people={people} role={me.role} editable={editable} online={online} onUpdate={update} onSave={() => void save()} onAct={(path) => void act(path)} />
+      <TaskEditor task={task} categories={categories} members={members} people={people} role={me.role} editable={editable} online={online} onUpdate={update} onSave={() => void saveTask({ task, role: me.role, online, toast, reload, load, setDetail, setDirty })} onAct={(path) => void actOnTask({ path, version: task.version, online, toast, reload, setDetail })} />
       <TaskActivity comments={detail.comments} events={detail.events} writable={canWrite(me.role)} online={online} comment={comment} onComment={setComment} onSubmit={sendComment} />
     </div>
   );

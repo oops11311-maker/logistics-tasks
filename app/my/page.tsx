@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { addMine } from "@/app/my/my-add";
 import { MyToolbar, type MyTab } from "@/app/my/toolbar";
 import { api, canWrite, type Task } from "@/components/api";
 import { changeCadence, changeStatus, State, TaskTables } from "@/components/bits";
@@ -34,22 +35,8 @@ export default function MyPage() {
     load();
   }, [tab, kind, revision]);
 
-  async function add(event: React.FormEvent) {
-    event.preventDefault();
-    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
-    if (addKind !== "once" && !due) return toast("반복 업무에는 마감일이 필요합니다.");
-    try {
-      await api("/api/tasks", {
-        method: "POST",
-        mutate: true,
-        body: JSON.stringify({ title, dueDate: due || null, categoryId: categoryId || null, priority, workKind: addKind }),
-      });
-      setTitle("");
-      toast("저장했습니다.");
-      load();
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "저장하지 못했습니다.");
-    }
+  function add(event: React.FormEvent) {
+    return addMine({ event, online, toast, addKind, due, title, categoryId, priority, clearTitle: () => setTitle(""), load });
   }
 
   const refresh = () => { reload(); load(); };

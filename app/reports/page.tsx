@@ -1,8 +1,10 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
-import { ReportLines, type ReportLine } from "@/app/reports/lines";
+import { ReportBoard } from "@/app/reports/report-board";
+import { copyReport, downloadReport } from "@/app/reports/report-files";
+import { reportPosts, reportRows } from "@/app/reports/report-posts";
+import { type ReportLine } from "@/app/reports/lines";
 import { api } from "@/components/api";
 import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
@@ -40,81 +42,21 @@ export default function ReportsPage() {
     load();
   }, [revision]);
 
-  async function copy() {
-    if (!report) return;
-    try {
-      await navigator.clipboard.writeText(report.text);
-      toast("보고서를 복사했습니다.");
-    } catch {
-      toast("복사하지 못했습니다. 글 안의 목록을 선택하세요.");
-    }
-  }
-
-  function download() {
-    if (!report) return;
-    const blob = new Blob([`\uFEFF${report.csv}`], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "report.csv";
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }
-
   if (loading && !report) return <State kind="loading">불러오는 중…</State>;
   if (error) return <State kind="error" onRetry={load}>{error}</State>;
   if (!report) return <State kind="empty">보고서가 없습니다.</State>;
 
-  const posts = [
-    { id: "done" as const, title: "이번 주 완료", count: report.doneThisWeek.length, hint: "이번 주 서울 주에 완료된 업무" },
-    { id: "progress" as const, title: "진행 중", count: report.inProgress.length, hint: "아직 끝나지 않은 진행 중 업무" },
-    { id: "overdue" as const, title: "마감 지남", count: report.overdue.length, hint: "지연 사유가 없으면 사유 미입력" },
-    { id: "next" as const, title: "다음 주", count: report.nextWeekTasks.length, hint: "다음 주 마감인 업무" },
-    { id: "people" as const, title: "담당자별", count: report.byAssignee.length, hint: "담당자별 진행, 지연, 이번 주 완료" },
-  ];
-  const current = posts.find((post) => post.id === open) ?? posts[0];
+  const posts = reportPosts(report);
+  const rows = reportRows(report, open);
 
   return (
     <div className="list">
       <div className="row">
-        <button className="btn" onClick={() => void copy()}>보고서 복사</button>
-        <button className="btn" onClick={download}>CSV 받기</button>
+        <button className="btn" onClick={() => void copyReport(report.text, toast)}>보고서 복사</button>
+        <button className="btn" onClick={() => downloadReport(report.csv)}>CSV 받기</button>
         <span className="hint">서울 {report.week.start}–{report.week.end}. 글은 저장된 업무만 모읍니다.</span>
       </div>
-      <div className="table-wrap">
-        <table className="board">
-          <thead>
-            <tr><th>글</th><th>건수</th><th>내용</th></tr>
-          </thead>
-          <tbody>
-            {posts.map((post) => (
-              <tr key={post.id} className={post.id === open ? "active" : ""}>
-                <td><button className="btn" onClick={() => setOpen(post.id)}>{post.title}</button></td>
-                <td>{post.count}</td>
-                <td>{post.hint}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <article className="panel article">
-        <h2>{current.title} {current.count}건</h2>
-        <p className="hint">{current.hint}</p>
-        {open === "people" ? report.byAssignee.map((row) => (
-          <Link key={row.id} href={`/team?assigneeId=${row.id}`} className="item">
-            <span className="title">{row.name}</span>
-            <span className="sub">진행 {row.open} · 지연 {row.overdue} · 이번 주 완료 {row.doneThisWeek}</span>
-          </Link>
-        )) : <ReportLines rows={rowsOf(report, open)} delay={open === "overdue"} />}
-      </article>
+      <ReportBoard open={open} posts={posts} people={report.byAssignee} rows={rows} onOpen={(id) => setOpen(id as (typeof ORDER)[number])} />
     </div>
   );
-}
-
-function rowsOf(report: Report, id: (typeof ORDER)[number]): ReportLine[] {
-  if (id === "done") return report.doneThisWeek;
-  if (id === "progress") return report.inProgress;
-  if (id === "overdue") return report.overdue;
-  if (id === "next") return report.nextWeekTasks;
-  return [];
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { ArchiveDialog, ProjectTable, type ProjectRow } from "@/app/projects/board";
+import { addProject, archiveProject } from "@/app/projects/project-actions";
 import { api } from "@/components/api";
 import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
@@ -28,31 +29,12 @@ export default function ProjectsPage() {
     load();
   }, [revision]);
 
-  async function remove() {
-    if (!pending) return;
-    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
-    const target = pending;
-    try {
-      await api(`/api/categories/${target.id}`, { method: "DELETE", mutate: true });
-      setPending(null);
-      toast("게시판을 보관했습니다. 연결된 업무는 그대로입니다.");
-      reload();
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "보관하지 못했습니다.");
-    }
+  function remove() {
+    return archiveProject({ pending, online, toast, clear: () => setPending(null), reload });
   }
 
-  async function add(event: React.FormEvent) {
-    event.preventDefault();
-    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
-    try {
-      await api("/api/categories", { method: "POST", mutate: true, body: JSON.stringify({ name }) });
-      setName("");
-      toast("저장했습니다.");
-      reload();
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "저장하지 못했습니다.");
-    }
+  function add(event: React.FormEvent) {
+    return addProject({ event, online, toast, name, clear: () => setName(""), reload });
   }
 
   if (loading && items.length === 0) return <State kind="loading">불러오는 중…</State>;

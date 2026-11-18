@@ -189,8 +189,9 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
     assert.equal(trusted.status, 401);
     delete process.env.VERCEL;
     await sql(`delete from rate_limits where actor_key like 'login:%'`);
-    const { rateLimit, RATE_LIMIT_ROW_CAP } = await import("../src/lib/http.ts");
+    const { rateLimit, RATE_LIMIT_ROW_CAP, rateLimitStorageKey } = await import("../src/lib/http.ts");
     const staleAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const windowStart = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
     for (let n = 0; n < 30; n += 1) {
       await sql(
         `insert into rate_limits (actor_key, window_start, count) values ($1, $2, 1)`,
@@ -202,20 +203,27 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
       [staleAt],
     );
     await sql(
-      `insert into rate_limits (actor_key, window_start, count) values ('login:ip:203.0.113.9', date_trunc('minute', now()), 4)`,
+      `insert into rate_limits (actor_key, window_start, count) values ('login:ip:203.0.113.9', $1, 4)`,
+      [windowStart],
     );
-    for (let n = 0; n < RATE_LIMIT_ROW_CAP + 40; n += 1) {
+    for (let n = 0; n < RATE_LIMIT_ROW_CAP; n += 1) {
       await sql(
-        `insert into rate_limits (actor_key, window_start, count) values ($1, date_trunc('minute', now()), 1)`,
-        [`login:user:flood-${n}`],
+        `insert into rate_limits (actor_key, window_start, count) values ($1, $2, 1)
+         on conflict (actor_key, window_start) do update set count = 1`,
+        [`login:user:#${n}`, windowStart],
       );
     }
-    const beforeFlood = await sql<{ n: number | string }>(
-      `select count(*)::int as n from rate_limits where actor_key like 'login:user:flood-%'`,
+    let firstSeenAllowed = 0;
+    for (let n = 0; n < 5; n += 1) {
+      if (await rateLimit("login:user:first-seen", 5)) firstSeenAllowed += 1;
+    }
+    assert.equal(firstSeenAllowed, 4);
+    const firstKey = rateLimitStorageKey("login:user:first-seen");
+    const firstCount = await sql<{ count: number | string }>(
+      `select count from rate_limits where actor_key = $1 and window_start = $2`,
+      [firstKey, windowStart],
     );
-    assert.equal(await rateLimit("login:user:kept-probe", 5), true);
-    const stored = await sql<{ n: number | string }>(`select count(*)::int as n from rate_limits where actor_key like 'login:user:%'`);
-    assert.equal(Number(stored[0].n), Number(beforeFlood[0].n));
+    assert.equal(Number(firstCount[0].count), 6);
     const staleNames = await sql<{ n: number | string }>(
       `select count(*)::int as n from rate_limits where actor_key like 'login:user:old-%' or actor_key = 'human:production:old-actor'`,
     );
@@ -224,35 +232,43 @@ test("권한, 공유, 반복, 알림 멱등성", { timeout: 90_000 }, async () =
       `select count from rate_limits where actor_key = 'login:ip:203.0.113.9'`,
     );
     assert.equal(Number(ipKept[0].count), 4);
-    const probeKept = await sql<{ n: number | string }>(
-      `select count(*)::int as n from rate_limits where actor_key = 'login:user:kept-probe'`,
-    );
-    assert.equal(Number(probeKept[0].n), 0);
-    const windowStart = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
-    await sql(
-      `insert into rate_limits (actor_key, window_start, count) values ('login:user:pinned-name', $1, 5)`,
-      [windowStart],
-    );
+    await sql(`delete from rate_limits`);
+    for (let n = 0; n < 5; n += 1) assert.equal(await rateLimit("login:user:pinned-name", 5), true);
     assert.equal(await rateLimit("login:user:pinned-name", 5), false);
-    const pinned = await sql<{ count: number | string }>(
-      `select count from rate_limits where actor_key = 'login:user:pinned-name'`,
+    const pinnedKey = rateLimitStorageKey("login:user:pinned-name");
+    const pinnedBefore = await sql<{ count: number | string }>(
+      `select count from rate_limits where actor_key = $1`,
+      [pinnedKey],
     );
-    assert.equal(Number(pinned[0].count), 6);
-    const flooded = await sql<{ n: number | string }>(
-      `select count(*)::int as n from rate_limits where actor_key like 'login:user:flood-%'`,
+    assert.equal(Number(pinnedBefore[0].count), 6);
+    for (let n = 0; n < 200; n += 1) await rateLimit(`login:user:flood-${n}`, 5);
+    const pinnedAfter = await sql<{ count: number | string }>(
+      `select count from rate_limits where actor_key = $1`,
+      [pinnedKey],
     );
-    assert.equal(Number(flooded[0].n), Number(beforeFlood[0].n));
+    assert.ok(Number(pinnedAfter[0].count) >= 6);
+    assert.equal(await rateLimit("login:user:pinned-name", 5), false);
     for (let n = 0; n < 20; n += 1) assert.equal(await rateLimit("login:ip:198.51.100.77", 20), true);
     assert.equal(await rateLimit("login:ip:198.51.100.77", 20), false);
     const stillPinned = await call("POST", "/api/auth/login", { body: { username: "pinned-name", password: wrong } });
     assert.equal(stillPinned.status, 429);
-    const unseen = await call("POST", "/api/auth/login", { body: { username: "never-seen-name", password: wrong } });
+    let openName = "";
+    for (let n = 0; n < 400; n += 1) {
+      const candidate = `open-name-${n}`;
+      const key = rateLimitStorageKey(`login:user:${candidate}`);
+      if (key === pinnedKey) continue;
+      const rows = await sql<{ count: number | string }>(`select count from rate_limits where actor_key = $1`, [key]);
+      if (Number(rows[0]?.count ?? 0) <= 1) {
+        openName = candidate;
+        break;
+      }
+    }
+    assert.ok(openName);
+    const unseen = await call("POST", "/api/auth/login", { body: { username: openName, password: wrong } });
     assert.equal(unseen.status, 401);
     assert.equal(unseen.data.message, deniedMessage);
-    const pinnedAfterLogin = await sql<{ count: number | string }>(
-      `select count from rate_limits where actor_key = 'login:user:pinned-name'`,
-    );
-    assert.equal(Number(pinnedAfterLogin[0].count), 7);
+    const tasksWhileLoggedOut = await call("GET", "/api/tasks");
+    assert.equal(tasksWhileLoggedOut.status, 401);
     await sql(`delete from rate_limits`);
 
     const adminUsername = "admin";

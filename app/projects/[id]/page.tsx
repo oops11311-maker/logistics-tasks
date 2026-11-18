@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { PostForm, PostTable } from "@/app/projects/[id]/posts";
+import { publishPost } from "@/app/projects/[id]/publish-post";
 import { api, canWrite, type Task } from "@/components/api";
 import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
@@ -40,29 +41,11 @@ export default function ProjectBoardPage() {
     load();
   }, [params.id, revision]);
 
-  async function publish(event: React.FormEvent) {
-    event.preventDefault();
-    if (!online) return toast("오프라인 상태에서는 편집할 수 없습니다.");
-    try {
-      await api(`/api/projects/${params.id}/posts`, {
-        method: "POST",
-        mutate: true,
-        body: JSON.stringify({
-          title,
-          body,
-          dueDate: due || null,
-          workKind: kind,
-          assigneeIds: admin && assignees.length > 0 ? assignees : [me.id],
-        }),
-      });
-      setTitle("");
-      setBody("");
-      setDue("");
-      toast("담당자 업무에 넣었습니다.");
-      reload();
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "올리지 못했습니다.");
-    }
+  function publish(event: React.FormEvent) {
+    return publishPost({
+      event, online, toast, projectId: params.id, title, body, due, kind, admin, assignees, meId: me.id,
+      clear: () => { setTitle(""); setBody(""); setDue(""); }, reload,
+    });
   }
 
   if (loading && !board) return <State kind="loading">불러오는 중…</State>;

@@ -1,6 +1,9 @@
 "use client";
 
-import { CADENCES, PRIORITIES, type Category } from "@/components/api";
+import { CADENCES } from "@/components/api";
+import { AddForm } from "@/app/my/add-form";
+import { KindFilter } from "@/app/my/kind-filter";
+import { type Category } from "@/components/api";
 
 const TABS = [
   ["today", "오늘"],
@@ -39,23 +42,7 @@ export function MyToolbar(props: {
   const filtered = props.tab !== "all" || props.kind !== "";
   return (
     <>
-      {props.writable ? (
-        <form className="filters" onSubmit={(event) => void props.onAdd(event)}>
-          <input className="field grow" aria-label="제목" placeholder="빠른 추가" value={props.title} onChange={(event) => props.onTitle(event.target.value)} required />
-          <input className="field" aria-label="마감일" type="date" value={props.due} onChange={(event) => props.onDue(event.target.value)} />
-          <select className="control" aria-label="프로젝트" value={props.categoryId} onChange={(event) => props.onCategory(event.target.value)}>
-            <option value="">프로젝트</option>
-            {props.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-          </select>
-          <select className="control" aria-label="우선순위" value={props.priority} onChange={(event) => props.onPriority(event.target.value)}>
-            {PRIORITIES.map((item) => <option key={item}>{item}</option>)}
-          </select>
-          <select className="control" aria-label="반복" value={props.addKind} onChange={(event) => props.onAddKind(event.target.value)}>
-            {CADENCES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
-          <button className="btn primary mutate" disabled={!props.online}>추가</button>
-        </form>
-      ) : null}
+      {props.writable ? <AddForm {...props} /> : null}
       <div className="filter-bar">
         <div className="segment" role="tablist" aria-label="기간">
           {TABS.map(([key, label]) => (
@@ -63,17 +50,7 @@ export function MyToolbar(props: {
           ))}
         </div>
         <div className="filter-actions">
-          <div className="filter-pop">
-            <button className={props.kind ? "btn on" : "btn"} aria-expanded={props.filtersOpen} aria-haspopup="dialog" onClick={() => props.onFiltersOpen((open) => !open)}>필터</button>
-            {props.filtersOpen ? (
-              <div className="filter-menu" role="dialog" aria-label="반복 필터">
-                <button className={props.kind === "" ? "tab on" : "tab"} onClick={() => { props.onKind(""); props.onFiltersOpen(false); }}>반복 전체</button>
-                {CADENCES.map(([value, label]) => (
-                  <button key={value} className={props.kind === value ? "tab on" : "tab"} onClick={() => { props.onKind(value); props.onFiltersOpen(false); }}>{label}</button>
-                ))}
-              </div>
-            ) : null}
-          </div>
+          <KindFilter kind={props.kind} open={props.filtersOpen} onOpen={props.onFiltersOpen} onKind={props.onKind} />
           <button className="btn" disabled={!filtered} onClick={props.onReset}>초기화</button>
         </div>
       </div>

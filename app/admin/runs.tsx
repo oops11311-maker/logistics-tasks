@@ -1,7 +1,9 @@
 "use client";
 
+import { RunHistory } from "@/app/admin/run-history";
+import { RunJobs } from "@/app/admin/run-jobs";
 import { type AdminState } from "@/app/admin/types";
-import { api, formatWhen } from "@/components/api";
+import { api } from "@/components/api";
 
 export function RunsSection(props: {
   data: AdminState;
@@ -30,22 +32,9 @@ export function RunsSection(props: {
       <p className="hint">{data.integration.schedulingNote}</p>
       <p className="hint">{data.integration.backupNote}</p>
       <button className="btn mutate" disabled={!props.online} onClick={() => void runJobs()}>지금 실행</button>
-      {data.jobs.map((job) => (
-        <div key={job.job} className={job.warning ? "item late" : "item"}>
-          <span>
-            <span className="title">{job.label}</span>
-            <span className="sub">성공 {formatWhen(job.lastSuccessAt)} · 다음 {formatWhen(job.nextDueAt)} · 재시도 {job.retryCount}{job.lastError ? ` · ${job.lastError}` : ""}</span>
-          </span>
-          {job.warning ? <span className="chip p-긴급">{job.warningText}</span> : null}
-        </div>
-      ))}
+      <RunJobs jobs={data.jobs} />
       <h2>최근 실행</h2>
-      {data.runs.length === 0 ? <p className="state">실행 기록이 없습니다.</p> : data.runs.slice(0, 12).map((run) => (
-        <div key={run.id} className="item">
-          <span>{run.job} · {run.status} · {run.source}</span>
-          <span className="sub">{formatWhen(run.startedAt)}{run.error ? ` · ${run.error}` : ""}</span>
-        </div>
-      ))}
+      <RunHistory runs={data.runs} />
     </section>
   );
 }

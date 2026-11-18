@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { FocusDetail, ratio, type FocusPerson } from "@/app/focus/person";
+import { FocusTable } from "@/app/focus/focus-table";
+import { FocusDetail, type FocusPerson } from "@/app/focus/person";
 import { api } from "@/components/api";
 import { State } from "@/components/bits";
 import { useApp } from "@/components/shell";
@@ -43,30 +44,7 @@ export default function FocusPage() {
   return (
     <div className="list">
       <p className="hint">서울 {data.week.start}–{data.week.end}. {data.note}</p>
-      {data.people.length === 0 ? <State kind="empty">집계할 멤버가 없습니다.</State> : (
-        <div className="table-wrap">
-          <table className="board">
-            <thead>
-              <tr>
-                <th>담당</th><th>열림</th><th>지연</th><th>이번 주 완료</th><th>기한 내</th><th>반복 이행</th><th>주력 프로젝트</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.people.map((item) => (
-                <tr key={item.id} className={person?.id === item.id ? "active" : ""}>
-                  <td><button className="btn" onClick={() => setOpen(item.id)}>{item.name}</button></td>
-                  <td>{item.open}</td>
-                  <td>{item.overdue}</td>
-                  <td>{item.doneThisWeek}</td>
-                  <td>{ratio(item.onTime, item.doneWithDue)}</td>
-                  <td>{ratio(item.repeatDone, item.repeatDue)}</td>
-                  <td>{item.open === 0 ? "없음" : `${item.topProject} ${item.topProjectCount}/${item.open}`}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <FocusTable people={data.people} openId={person?.id ?? null} onOpen={setOpen} />
       {person ? <FocusDetail person={person} /> : null}
     </div>
   );

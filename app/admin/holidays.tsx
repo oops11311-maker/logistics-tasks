@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { type Settings } from "@/app/admin/types";
+import { HolidayList } from "@/app/admin/holiday-list";
+import { type Settings } from "@/app/admin/settings-type";
 
 export function HolidayFields(props: {
   exclude: boolean;
@@ -28,15 +29,7 @@ export function HolidayFields(props: {
           setHolidayName("");
         }}>날짜 추가</button>
       </div>
-      {props.holidays.map((holiday) => (
-        <div key={holiday.day} className="item">
-          <span>{holiday.day} {holiday.name}</span>
-          <button className="btn" type="button" onClick={() => props.patch((_settings, holidays) => {
-            const index = holidays.findIndex((item) => item.day === holiday.day);
-            if (index >= 0) holidays.splice(index, 1);
-          })}>빼기</button>
-        </div>
-      ))}
+      <HolidayList holidays={props.holidays} patch={props.patch} />
     </>
   );
 }
